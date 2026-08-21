@@ -181,10 +181,15 @@ Point at a different model with `WAMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
   rather than passed as arguments. Process arguments are readable by every
   other process running as you via `/proc/<pid>/cmdline`, so none of this is
   put there.
-  **One exception, outside this plugin's control:** `wacli send text` takes the
-  recipient and the message body as command-line arguments. For the second or
-  so a reply is in flight, they are visible in `ps` to other processes running
-  as you. That is wacli's interface; it is stated here rather than glossed over.
+  Two residual exposures, stated rather than glossed over — both are visible
+  only to processes already running **as you**, never to other users:
+  - `wacli send text` takes the recipient and the message body as command-line
+    arguments, so during the second or so a reply is in flight they appear in
+    `ps`. That is wacli's interface and cannot be avoided from here.
+  - The panel invokes the helper as `wa-ctl.sh <action> <chat-jid> …`, so the
+    JID of the chat you are acting on — a phone number, or a group id — is in
+    that short-lived process's own arguments. Message content, the allow-list,
+    and voice-note transcripts never are.
 - Attachment paths recorded in the database are verified to resolve inside
   wacli's own store before any file is handed to a player or viewer;
   WhatsApp-supplied filenames are never used to build a path.

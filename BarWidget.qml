@@ -237,9 +237,13 @@ BarWidget {
     // that leaves `text` empty silently never appears in the bar, so this is
     // set even though the Row below is what actually gets drawn.
     text: root.shouldHide ? "" : (root.barText !== "" ? root.barText : root.iconWhatsApp)
+    // Omarchy's PanelToolTip sets no textFormat, so its Text defaults to
+    // AutoText. errorText carries wacli / sqlite3 output verbatim, which can
+    // include a WhatsApp-supplied filename, so the whole string is put through
+    // the same markup strip the bar label uses.
     tooltipText: {
       if (!root.everLoaded) return "WhatsApp: loading…"
-      if (!root.healthy)    return "WhatsApp: " + root.errorText
+      if (!root.healthy)    return "WhatsApp: " + root.plain(root.errorText)
       var lbl = root.widgetLabel ? root.plain(root.widgetLabel) + " — " : ""
       if (root.paused)   return lbl + "WhatsApp notifications paused"
       if (!root.syncRunning) return lbl + "wacli sync is not running — counts are stale"

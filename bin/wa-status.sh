@@ -140,6 +140,10 @@ FROM (
     AND m.deleted_for_me = 0
     AND m.payload_purged_at IS NULL
     AND m.reaction_to_id IS NULL
+    -- A message stamped in the future would sit permanently above every
+    -- watermark and could never be cleared; 5 minutes of slack absorbs
+    -- ordinary clock skew between this machine and WhatsApp's servers.
+    AND m.ts <= strftime('%s','now') + 300
     AND m.chat_jid <> 'status@broadcast'
     AND c.kind IN ($KIND_FILTER)
   ORDER BY m.ts DESC

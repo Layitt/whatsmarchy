@@ -21,13 +21,47 @@ command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"error":"jq is not instal
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-wamarchy"
 MEDIA_CACHE="$CACHE_DIR/media"
+# Ceiling for anything handed to an image decoder, a media player, or a viewer.
+# 25 MiB is far above any preview worth showing and far below "fills the disk".
+MAX_MEDIA_BYTES=$((25 * 1024 * 1024))
+# Previewed attachments are a cache, not a mailbox: without a bound, a group
+# that posts photos all day fills the disk with files the user merely glanced at.
+MEDIA_CACHE_MAX_AGE_DAYS=14
+MEDIA_CACHE_MAX_FILES=400
 
 ensure_cache() {
   mkdir -p -- "$MEDIA_CACHE" 2>/dev/null || emit_error "cannot create $MEDIA_CACHE"
   chmod 700 -- "$CACHE_DIR" "$MEDIA_CACHE" 2>/dev/null
+  prune_media_cache
 }
 
-emit_ok() { jq -cn "$@" '$ARGS.named + {ok: true}'; exit 0; }
+prune_media_cache() {
+  # Age first, then a hard file count, oldest-accessed first. Both are
+  # best-effort: a failure to prune must never stop the action the user asked
+  # for, so every step here swallows its own errors.
+  find "$MEDIA_CACHE" -maxdepth 1 -type f -mtime "+$MEDIA_CACHE_MAX_AGE_DAYS" -delete 2>/dev/null
+  local count
+  count="$(find "$MEDIA_CACHE" -maxdepth 1 -type f -printf '.' 2>/dev/null | wc -c)"
+  is_uint "${count:-}" || return 0
+  (( count > MEDIA_CACHE_MAX_FILES )) || return 0
+  find "$MEDIA_CACHE" -maxdepth 1 -type f -printf '%A@ %p\0' 2>/dev/null \
+    | sort -zn \
+    | head -z -n "$(( count - MEDIA_CACHE_MAX_FILES ))" \
+    | cut -z -d' ' -f2- \
+    | xargs -0r rm -f -- 2>/dev/null
+  return 0
+}
+
+emit_ok() {
+  # jq failing here (a malformed --argjson, for instance) would otherwise print
+  # nothing and exit 0 — an empty stdout that still reads as success and breaks
+  # the "always exactly one JSON object" contract.
+  local out
+  out="$(jq -cn "$@" '$ARGS.named + {ok: true}' 2>/dev/null)"
+  [[ -n "$out" ]] || emit_error "could not build the response payload"
+  printf '%s\n' "$out"
+  exit 0
+}
 
 # jq arguments land in /proc/<pid>/cmdline, readable by any other process
 # running as this user for the life of the call. Chat JIDs are phone numbers and
@@ -49,9 +83,19 @@ cmd_recipients() {
 
   # Ordered the way the picker should read: most recently active first, so the
   # chats a user actually wants to allow are at the top of a long list.
-  rows="$(sqlite3 -readonly -noheader -batch -- "$db" <<'SQL'
+  # The label is a contact or group name, i.e. a string chosen by whoever is
+  # messaging this user. It ends up in Omarchy's shared MultiSelect, whose Text
+  # elements do not pin textFormat and therefore default to Text.AutoText — so a
+  # push_name of `<img src="https://evil.tld/p.png">` would fire an outbound
+  # request the moment the picker is opened, and `<table width=...>` would let
+  # one contact overrun another's row. The shared component is not this plugin's
+  # to depend on, so the markup characters are stripped here at the source, the
+  # same way BarWidget does for the bar label.
+  rows="$( sqlite3 -readonly -noheader -batch -- "$db" <<'SQL' 2>&1
     SELECT COALESCE(json_group_array(json_object(
-      'value', jid, 'label', label, 'description', descr
+      'value', jid, 'label',
+        replace(replace(replace(label, '<', ' '), '>', ' '), '&', ' '),
+      'description', descr
     )), '[]')
     FROM (
       SELECT
@@ -74,7 +118,7 @@ cmd_recipients() {
       LIMIT 500
     );
 SQL
-2>&1)" || emit_error "sqlite read failed: $rows"
+  )" || emit_error "sqlite read failed: $rows"
 
   printf '%s' "$rows" | jq -e 'type == "array"' >/dev/null 2>&1 \
     || emit_error "unexpected recipient query result"
@@ -135,9 +179,16 @@ cmd_set_allow() {
 # a stale panel payload replaying an old timestamp must not resurrect messages
 # the user already dismissed.
 cmd_mark_seen() {
-  local jid="${1-}" ts="${2-}" cfg
+  local jid="${1-}" ts="${2-}" cfg now
   is_jid "$jid" || emit_error "invalid chat id"
   is_uint "$ts" || emit_error "invalid timestamp"
+  # The timestamp comes from a WhatsApp message and the merge below is
+  # deliberately monotonic-forward. A message dated in the future would
+  # therefore pin this chat's watermark to the future and hide every genuine
+  # message from that contact from then on — permanently, since mark-all-seen
+  # is written to preserve entries above the global watermark. Clamped to now.
+  now="$(date +%s)"
+  (( ts > now )) && ts="$now"
   cfg="$(read_config | jq -c --slurpfile j <(json_arg "$(json_string "$jid")") --argjson t "$ts" \
     '.seen[$j[0]] = ([(.seen[$j[0]] // 0), $t] | max)')" || emit_error "could not update config"
   write_config "$cfg" || emit_error "cannot write $(config_path)"
@@ -251,6 +302,12 @@ SQL
           } | sqlite3 -readonly -noheader -batch -- "$db" 2>&1 )" \
     || emit_error "sqlite read failed: $row"
   [[ -n "$row" ]] || emit_error "message not found in the local store"
+  # sqlite3 exits 0 even when a .parameter line fails to parse, printing a usage
+  # banner instead of a row. Without this check both fields would silently
+  # become "" and the code would fall through to a fresh download with a .bin
+  # extension, reporting a fault as an ordinary cache miss.
+  printf '%s' "$row" | jq -e 'type == "object"' >/dev/null 2>&1 \
+    || emit_error "unexpected media lookup result"
 
   local_path="$(printf '%s' "$row" | jq -r '.localPath')"
   mime="$(printf '%s' "$row" | jq -r '.mime')"
@@ -269,6 +326,7 @@ SQL
     fi
   fi
 
+  require_cmd sha256sum
   ensure_cache
   target="$MEDIA_CACHE/$(printf '%s\n%s' "$jid" "$msg_id" | sha256sum | cut -d' ' -f1).$(ext_for_mime "$mime")"
   if [[ -s "$target" ]]; then
@@ -277,15 +335,31 @@ SQL
   fi
 
   require_cmd wacli
+  # Downloaded to a temp name and renamed into place only once it is complete.
+  # Writing straight to $target would mean that a download killed part-way —
+  # Quickshell tearing the Process down when the panel closes, a logout, an OOM
+  # kill — leaves a truncated file that the `[[ -s ]]` check above then serves
+  # forever as a valid attachment. The rename is atomic, so two callers racing
+  # on the same message cannot see a half-written file either.
+  local tmp
+  tmp="$(mktemp "$MEDIA_CACHE/.dl.XXXXXX")" || emit_error "cannot create a download temp file"
+  chmod 600 -- "$tmp" 2>/dev/null
+  trap 'rm -f -- "$tmp"' RETURN
   # --read-only keeps this out of session.db and off the store lock, so it
   # cannot disturb a running `wacli sync --follow`. Media is fetched straight
   # from WhatsApp's CDN using the key already stored in wacli.db.
-  out="$(wacli --read-only media download --chat "$jid" --id "$msg_id" --output "$target" 2>&1)"
-  if (( $? != 0 )) || [[ ! -s "$target" ]]; then
-    rm -f -- "$target"
+  out="$(wacli --read-only media download --chat "$jid" --id "$msg_id" --output "$tmp" 2>&1)"
+  if (( $? != 0 )) || [[ ! -s "$tmp" ]]; then
     emit_error "media download failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
-  chmod 600 -- "$target" 2>/dev/null
+  # A decoder handed an enormous file is a denial of service in itself, so the
+  # ceiling is enforced before the path is ever returned to the panel.
+  local size
+  size="$(stat -c '%s' -- "$tmp" 2>/dev/null || printf '0')"
+  if ! is_uint "$size" || (( size > MAX_MEDIA_BYTES )); then
+    emit_error "attachment is larger than the ${MAX_MEDIA_BYTES} byte preview limit"
+  fi
+  mv -f -- "$tmp" "$target" || emit_error "could not store the downloaded attachment"
   RESOLVED_MEDIA="$target"
 }
 
@@ -309,8 +383,14 @@ cmd_play() {
 
   # Plain playback of the raw file — no transcoding, no extra dependency
   # beyond a player that is already on essentially every desktop.
+  # The bytes are attacker-supplied and mpv identifies a file by content, not by
+  # the extension this cache gave it: an "audio/mpeg" attachment whose body is
+  # `#EXTM3U` + a URL would otherwise be opened as a playlist and its entries
+  # fetched on a Play click. --no-config also keeps the user's mpv.conf and any
+  # user Lua scripts out of the picture.
   if command -v mpv >/dev/null 2>&1; then
-    setsid mpv --no-video --really-quiet --no-terminal -- "$path" >/dev/null 2>&1 &
+    setsid mpv --no-config --no-video --really-quiet --no-terminal \
+      --load-unsafe-playlists=no --demuxer=lavf -- "$path" >/dev/null 2>&1 &
   elif command -v ffplay >/dev/null 2>&1; then
     setsid ffplay -nodisp -autoexit -loglevel quiet -- "$path" >/dev/null 2>&1 &
   elif command -v paplay >/dev/null 2>&1; then

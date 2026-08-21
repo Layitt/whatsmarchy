@@ -136,7 +136,12 @@ Panel {
   // Every mutating call goes through wa-ctl.sh, which validates its own
   // arguments; the panel never builds a wacli command line itself.
   function runAction(args, onDone) {
-    if (actionProc.running) return
+    if (actionProc.running) {
+      // One action at a time. Silently swallowing the click would look like the
+      // button is broken, which is worse than saying why nothing happened.
+      root.actionError = "Still working on the previous action…"
+      return
+    }
     root.actionError = ""
     actionProc.pending = onDone || null
     actionProc.command = [root.ctlScript].concat(args)
@@ -547,7 +552,14 @@ Panel {
             }
             // Populated live from wacli's synced chats, so the picker always
             // reflects the real address book rather than a hard-coded list.
-            optionsCommand: [root.ctlScript, "recipients"]
+            // Held empty until the host widget has been injected: MultiSelect
+            // refreshes on Component.onCompleted, which runs before the Loader
+            // that owns this panel hands it a hostWidget. With an empty
+            // ctlScript that spawns `["", "recipients"]` and leaves the picker
+            // stuck showing an options-command error. Assigning the real
+            // command later re-fires onOptionsCommandChanged, so the list still
+            // loads on its own.
+            optionsCommand: root.ctlScript !== "" ? [root.ctlScript, "recipients"] : []
             placeholderText: "Search contacts and groups…"
             emptyText: "No synced chats yet — let wacli sync run first"
             noSelectionText: "No chats selected — nothing will notify you"
@@ -784,6 +796,13 @@ Panel {
                               || String(msgItem.modelData.mediaType) === "sticker")
                         source: msgItem.thumb !== "" ? root.fileUrl(msgItem.thumb) : ""
                         fillMode: Image.PreserveAspectFit
+                        // Both axes are capped. With only a height cap, Qt
+                        // scales the other axis proportionally, so a 200000x20
+                        // image still decodes to ~1.5 megapixels wide — a
+                        // decompression bomb from anyone who can send a photo.
+                        // wa-ctl.sh separately refuses to hand over a file over
+                        // its byte ceiling, so the decoder never sees one.
+                        sourceSize.width: Style.space(340)
                         sourceSize.height: Style.space(150)
                         asynchronous: true
                         cache: false

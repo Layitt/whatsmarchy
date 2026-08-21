@@ -4,6 +4,13 @@
 # Sourced, never executed. Every function here is expected to be usable from a
 # script running under `set -uo pipefail` with `umask 077`.
 
+# The validators below use ranges like [A-Za-z0-9]. Under a UTF-8 locale those
+# collate loosely — fr_FR.UTF-8 matches "é", "İ" and friends inside [A-Za-z].
+# Nothing dangerous collates in (no quote, slash, or whitespace does), but these
+# patterns are meant to be byte-exact, so the collation is pinned rather than
+# left to whatever locale the desktop session happens to carry.
+export LC_ALL=C
+
 # --- JSON output ------------------------------------------------------------
 # Both entry points share one contract: exit 0, print exactly one JSON object.
 # A widget that has to distinguish "script crashed" from "no messages" on
@@ -68,10 +75,19 @@ config_defaults='{"mode":"all","allow":[],"seen":{},"seenAll":0}'
 assert_config_safe() {
   local path st mode owner
   path="$(config_path)"
-  [[ -e "$path" ]] || return 0
+  [[ -e "$path" || -L "$path" ]] || return 0
+  # Refused explicitly rather than as a side effect of a symlink's 777 mode
+  # happening to trip the check below: that only works because GNU stat does
+  # not dereference by default, and a later switch to `stat -L` would silently
+  # reopen a symlink-swap on $WAMARCHY_CONFIG.
+  [[ -L "$path" ]] && emit_error "config file is a symlink, refusing to use it: $path"
   st="$(stat -c '%a %U' -- "$path" 2>/dev/null)" || emit_error "cannot stat $path"
   mode="${st%% *}"
   owner="${st#* }"
+  # An unparseable mode must not sail through: `(( 8#$mode & ... ))` on garbage
+  # raises an arithmetic error, and `((` reports that as *false*, which would
+  # read as "permissions are fine".
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || emit_error "cannot read permissions of $path"
   [[ "$owner" == "$(id -un)" ]] \
     || emit_error "config file is not owned by you: $path"
   (( 8#$mode & 8#022 )) \
@@ -131,7 +147,11 @@ is_jid() {
 
 is_msg_id() {
   # WhatsApp message IDs are hex-ish/base32-ish; keep it strict and printable.
-  [[ "${1-}" =~ ^[A-Za-z0-9_-]{1,128}$ ]]
+  # The first character may not be "-": `wacli media download --id -o` would
+  # otherwise hand a flag-shaped value to a Go flag parser. spf13/pflag happens
+  # to consume it as a value today, but that is upstream's choice, not a
+  # guarantee. "=" is allowed because base64-ish IDs really do carry padding.
+  [[ "${1-}" =~ ^[A-Za-z0-9_][A-Za-z0-9_=-]{0,127}$ ]]
 }
 
 is_uint() {
