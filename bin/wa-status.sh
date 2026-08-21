@@ -8,7 +8,8 @@
 #
 # Contract: always exits 0, always emits exactly one JSON object on stdout.
 #   success -> {"ok":true,"mode":"..","paused":..,"syncRunning":..,
-#               "totalNew":N,"chatCount":N,"topSender":"..","chats":[..]}
+#               "truncated":..,"totalNew":N,"chatCount":N,"topSender":"..",
+#               "chats":[..]}
 #   failure -> {"ok":false,"error":".."}
 #
 # A failure must never be rendered as "0 new messages": the widget
@@ -79,7 +80,7 @@ is_uint "$SEEN_ALL" || emit_error "corrupt watermark in $(config_path)"
 
 if [[ "$MODE" == "paused" ]]; then
   jq -cn --arg m "$MODE" --argjson s "$sync_running" \
-    '{ok:true, mode:$m, paused:true, syncRunning:$s, totalNew:0, chatCount:0, topSender:"", chats:[]}'
+    '{ok:true, mode:$m, paused:true, syncRunning:$s, truncated:false, totalNew:0, chatCount:0, topSender:"", chats:[]}'
   exit 0
 fi
 
@@ -156,10 +157,18 @@ fi
 printf '%s' "$rows" | jq -e 'type == "array"' >/dev/null 2>&1 \
   || emit_error "unexpected query result from $DB"
 
+# If the scan hit its own ceiling, the counts below are a floor, not a total.
+# Reporting the capped number as if it were exact would understate a real
+# backlog silently — the widget renders "500+" instead once this is set.
+scanned="$(printf '%s' "$rows" | jq 'length')"
+truncated=false
+[[ "$scanned" == "$SCAN_LIMIT" ]] && truncated=true
+
 printf '%s' "$rows" | jq -c \
   --argjson cfg "$CONFIG" \
   --argjson limit "$PREVIEW_LIMIT" \
-  --argjson syncRunning "$sync_running" '
+  --argjson syncRunning "$sync_running" \
+  --argjson truncated "$truncated" '
   ($cfg.seenAll) as $seenAll
   | ($cfg.seen)  as $seen
   | ($cfg.mode)  as $mode
@@ -199,6 +208,7 @@ printf '%s' "$rows" | jq -c \
       mode: $mode,
       paused: false,
       syncRunning: $syncRunning,
+      truncated: $truncated,
       totalNew:  (map(.count) | add // 0),
       chatCount: length,
       topSender: (if length > 0 then .[0].name else "" end),

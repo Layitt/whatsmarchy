@@ -7,9 +7,6 @@ The bar tells you **who is waiting and how many messages** — never what they
 said. Click for previews, image thumbnails, voice-note playback, optional local
 transcription, and a quick text reply.
 
-![Bar widget](docs/bar-widget.png)
-![Panel](docs/panel.png)
-
 ## How it works
 
 `wacli` pairs as a linked WhatsApp Web device and mirrors your messages into a
@@ -41,15 +38,24 @@ nothing here re-implements the WhatsApp protocol.
 
 ### 1. Install and pair wacli
 
-wacli is not packaged for Arch. Use the Homebrew tap or a release archive:
+wacli is not packaged for Arch, and the Homebrew tap is a heavy dependency for
+one binary. The release archive is the simplest route:
 
 ```bash
-# Homebrew (works on Linux)
-brew install openclaw/tap/wacli
-
-# or: download the linux_amd64 archive from
-# https://github.com/openclaw/wacli/releases and put `wacli` on your PATH
+VER=0.17.1   # check https://github.com/openclaw/wacli/releases for the latest
+cd "$(mktemp -d)"
+curl -fLO "https://github.com/openclaw/wacli/releases/download/v$VER/wacli_${VER}_linux_amd64.tar.gz"
+curl -fLO "https://github.com/openclaw/wacli/releases/download/v$VER/checksums.txt"
+sha256sum -c --ignore-missing checksums.txt
+tar xzf "wacli_${VER}_linux_amd64.tar.gz"
+install -Dm755 wacli ~/.local/bin/wacli
+wacli --version
 ```
+
+`~/.local/bin` is on the PATH the Omarchy shell inherits, so the widget will
+find it there. Homebrew (`brew install openclaw/tap/wacli`) and a source build
+(`CGO_ENABLED=1 go install -tags sqlite_fts5 github.com/openclaw/wacli/cmd/wacli@latest`)
+both work too — a source build needs the `sqlite_fts5` tag for search.
 
 Then pair it. This shows a QR code you scan from your phone
 (**WhatsApp → Settings → Linked devices → Link a device**):

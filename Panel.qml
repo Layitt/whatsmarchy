@@ -21,6 +21,7 @@ Panel {
   readonly property bool   paused:      hostWidget ? hostWidget.paused === true : false
   readonly property bool   syncRunning: hostWidget ? hostWidget.syncRunning === true : false
   readonly property int    totalNew:    hostWidget ? hostWidget.totalNew : 0
+  readonly property bool   truncated:   hostWidget ? hostWidget.truncated === true : false
   readonly property var    chats:       hostWidget ? hostWidget.chats : []
   readonly property string widgetLabel: hostWidget ? hostWidget.widgetLabel : ""
   readonly property string ctlScript:   hostWidget ? hostWidget.ctlScript : ""
@@ -410,7 +411,8 @@ Panel {
                 if (root.errorText !== "") return "unavailable"
                 if (root.paused) return "notifications paused"
                 if (root.totalNew === 0) return "nothing new"
-                return root.totalNew + (root.totalNew === 1 ? " new message" : " new messages")
+                return root.totalNew + (root.truncated ? "+" : "")
+                  + (root.totalNew === 1 && !root.truncated ? " new message" : " new messages")
               }
               color: root.totalNew > 0 && root.errorText === "" && !root.paused
                 ? root.accentColor
@@ -684,6 +686,12 @@ Panel {
                       width: chatRow.width - Style.space(8) * 3 - Style.font.icon
                              - countBadge.implicitWidth - timeText.implicitWidth
                       text: String(chatItem.modelData.name)
+                      // Contact and group names are chosen by whoever is
+                      // messaging you. Text defaults to AutoText, which would
+                      // render "<b>Bank</b>" as bold and let an <img> tag pull
+                      // in a local file. Every attacker-controlled string in
+                      // this panel is pinned to PlainText.
+                      textFormat: Text.PlainText
                       color: root.barForeground
                       font.pixelSize: Style.font.body
                       font.bold: true
@@ -749,6 +757,7 @@ Panel {
                         width: parent.width
                         visible: String(chatItem.modelData.kind) === "group" && String(msgItem.modelData.sender) !== ""
                         text: String(msgItem.modelData.sender)
+                        textFormat: Text.PlainText
                         color: Util.alpha(root.accentColor, 0.9)
                         font.pixelSize: Style.font.caption
                         font.bold: true
@@ -796,7 +805,9 @@ Panel {
                         }
                         Text {
                           anchors.verticalCenter: parent.verticalCenter
+                          // mediaLabel can be a WhatsApp-supplied filename.
                           text: root.mediaLabel(msgItem.modelData)
+                          textFormat: Text.PlainText
                           color: Util.alpha(root.barForeground, 0.7)
                           font.pixelSize: Style.font.caption
                           elide: Text.ElideRight

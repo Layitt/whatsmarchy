@@ -26,6 +26,7 @@ BarWidget {
   property int    totalNew: 0
   property int    chatCount: 0
   property string topSender: ""
+  property bool   truncated: false
   property var    chats: []
 
   readonly property bool healthy: errorText === ""
@@ -54,7 +55,20 @@ BarWidget {
   // Bar text never includes message content — only who is waiting and how
   // many. That is the whole point of the "how much is shown" spectrum: the
   // always-visible surface leaks nothing a passer-by could read.
-  readonly property string countText: totalNew > 99 ? "99+" : String(totalNew)
+  // topSender is a contact or group name — chosen by whoever is messaging you.
+  // It reaches a Text and a tooltip, both of which default to auto-detecting
+  // rich text, so markup characters and line breaks are stripped at the source
+  // rather than at each of the several places the name is rendered.
+  function plain(s) {
+    return String(s).replace(/[<>&]/g, " ").replace(/[\r\n\t]+/g, " ")
+  }
+  readonly property string safeSender: root.plain(root.topSender)
+
+  // A capped scan yields a floor, so the count is always shown with a "+"
+  // rather than as an exact figure it cannot stand behind.
+  readonly property string countText:
+    (totalNew > 99 || root.truncated) ? (totalNew > 99 ? "99+" : String(totalNew) + "+")
+                                      : String(totalNew)
   readonly property string barText: {
     if (!everLoaded) return ""
     if (!healthy)    return "!"
@@ -63,7 +77,7 @@ BarWidget {
     if (barDetail === "Icon only")  return ""
     if (barDetail === "Count only") return countText
     // "Sender and count": one chat names it, several just say how many.
-    if (chatCount === 1) return root.topSender + " " + countText
+    if (chatCount === 1) return root.safeSender + " " + countText
     return chatCount + " chats · " + countText
   }
 
@@ -122,6 +136,7 @@ BarWidget {
     root.mode        = String(payload.mode || "all")
     root.paused      = payload.paused === true
     root.syncRunning = payload.syncRunning === true
+    root.truncated   = payload.truncated === true
     root.chatCount   = typeof payload.chatCount === "number" ? payload.chatCount : 0
     root.topSender   = String(payload.topSender || "")
     root.chats       = Array.isArray(payload.chats) ? payload.chats : []
@@ -225,11 +240,11 @@ BarWidget {
     tooltipText: {
       if (!root.everLoaded) return "WhatsApp: loading…"
       if (!root.healthy)    return "WhatsApp: " + root.errorText
-      var lbl = root.widgetLabel ? root.widgetLabel + " — " : ""
+      var lbl = root.widgetLabel ? root.plain(root.widgetLabel) + " — " : ""
       if (root.paused)   return lbl + "WhatsApp notifications paused"
       if (!root.syncRunning) return lbl + "wacli sync is not running — counts are stale"
       if (root.totalNew === 0) return lbl + "No new WhatsApp messages"
-      return lbl + root.totalNew + " new in " + root.chatCount
+      return lbl + root.totalNew + (root.truncated ? "+" : "") + " new in " + root.chatCount
         + (root.chatCount === 1 ? " chat" : " chats")
     }
     onPressed: function (buttonCode) {
@@ -251,6 +266,7 @@ BarWidget {
       Text {
         anchors.verticalCenter: parent.verticalCenter
         text: root.paused ? root.iconMuted : root.iconWhatsApp
+        textFormat: Text.PlainText
         color: root.stateColor
         font.family: button.fontFamily
         font.pixelSize: button.fontSize
@@ -260,6 +276,7 @@ BarWidget {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.barText !== ""
         text: root.barText
+        textFormat: Text.PlainText
         color: root.stateColor
         font.family: button.fontFamily
         font.pixelSize: button.fontSize
