@@ -53,6 +53,30 @@ Panel {
   property string whisperDetail: ""
   property bool   confirmInstallOpen: false
 
+  // --- voice reply state ----------------------------------------------------
+  // Panel-scoped rather than per-delegate: there is one microphone, so there is
+  // one recording, and the Process that owns it lives out here next to sendProc
+  // rather than inside a Repeater delegate that can be destroyed mid-take.
+  property bool   voiceAvailable: false
+  property string voiceDetail: ""
+  property int    voiceMaxSeconds: 120
+  // idle -> recording -> preview -> sending. There is deliberately no edge from
+  // recording straight to sending: the point of this feature is that you hear
+  // what you recorded before anyone else does.
+  property string voiceState: "idle"
+  property string voiceJid: ""
+  // Kept alongside the JID because the banner lives outside the chat list and
+  // has no delegate to read a name off — by design: the chat it names may well
+  // have left the list by the time the recording stops.
+  property string voiceName: ""
+  property string voiceToken: ""
+  property int    voiceSeconds: 0
+  // "ok" | "silent" | "unknown". Three states, not a boolean: a level check that
+  // could not run must not be indistinguishable from one that passed.
+  property string voiceLevel: "ok"
+  property bool   voiceDiscardOnStop: false
+  property bool   voiceAbandonOnSend: false
+
   function msgKey(jid, id) { return String(jid) + "|" + String(id) }
 
   // A local path becomes a file: URL. Percent-encoding matters: a store path
@@ -85,11 +109,22 @@ Panel {
       root.actionError = ""
       configProc.reload()
       whisperProc.probe()
+      voiceStatusProc.probe()
     } else {
+      // Before anything else: a panel the user has dismissed must not leave a
+      // microphone running behind it.
+      root.cancelVoice()
       root.expandedJid = ""
       root.settingsOpen = false
       root.confirmInstallOpen = false
     }
+  }
+
+  // A recording belongs to the conversation it was started in. Collapsing that
+  // chat or opening another one abandons the draft rather than quietly
+  // recording on into a row nobody can see.
+  onExpandedJidChanged: {
+    if (root.voiceState !== "idle" && root.voiceJid !== root.expandedJid) root.cancelVoice()
   }
 
   // Keeps "2 min ago" honest while the panel sits open between polls.
@@ -104,6 +139,12 @@ Panel {
     if (secs < 3600)  return Math.round(secs / 60) + "m"
     if (secs < 86400) return Math.round(secs / 3600) + "h"
     return Math.round(secs / 86400) + "d"
+  }
+
+  function mmss(secs) {
+    var s = Math.max(0, Math.round(secs))
+    var r = s % 60
+    return Math.floor(s / 60) + ":" + (r < 10 ? "0" : "") + r
   }
 
   function mediaGlyph(m) {
@@ -318,6 +359,241 @@ Panel {
       root.transcripts = root.withEntry(root.transcripts, key, String(payload.text || ""))
       root.busyKey = ""
     })
+  }
+
+  // --- voice reply ----------------------------------------------------------
+  // Same rule as the text reply: a human starts it, a human stops it, and a
+  // human presses Send after listening back. Nothing here records or sends on
+  // its own, and no state machine edge exists that would let it.
+
+  Process {
+    id: voiceStatusProc
+    running: false
+    function probe() { if (!voiceStatusProc.running) voiceStatusProc.running = true }
+    command: [root.ctlScript, "voice-status"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var p = JSON.parse(this.text)
+          root.voiceAvailable = !!(p && p.ok === true && p.available === true)
+          root.voiceDetail = String((p && (p.detail || p.recorder)) || "")
+          if (p && typeof p.maxSeconds === "number" && p.maxSeconds > 0)
+            root.voiceMaxSeconds = p.maxSeconds
+        } catch (e) {
+          root.voiceAvailable = false
+          root.voiceDetail = ""
+        }
+      }
+    }
+  }
+
+  // Stopping is "close this process's stdin" — the same pipe the text reply
+  // uses to hand over its body, here used only for its EOF. Nothing is ever
+  // written to it. Making stop mean "the pipe closed" is what guarantees the
+  // microphone cannot outlive the panel: if Quickshell tears this Process down,
+  // the recorder ends for exactly the same reason a Stop click ends it.
+  Process {
+    id: recordProc
+    running: false
+    stdinEnabled: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var discard = root.voiceDiscardOnStop
+        root.voiceDiscardOnStop = false
+        var payload = null
+        try { payload = JSON.parse(this.text) } catch (e) { payload = null }
+        if (!payload || payload.ok !== true) {
+          root.actionError = String((payload && payload.error) || "recording failed")
+          root.resetVoice()
+          return
+        }
+        if (discard) {
+          // Cancelled while the tape was still running. wa-ctl.sh had already
+          // committed the file by then, so it has to be deleted rather than
+          // merely forgotten about.
+          root.discardRecording(String(payload.token))
+          root.resetVoice()
+          return
+        }
+        root.voiceToken = String(payload.token || "")
+        // The encoded length, not the UI's own count: a suspended input device
+        // takes a moment to wake, and the honest number is the one that came
+        // back with the file.
+        if (typeof payload.seconds === "number") root.voiceSeconds = payload.seconds
+        root.voiceLevel = payload.silent === true ? "silent"
+                        : (payload.silent === false ? "ok" : "unknown")
+        root.voiceState = root.voiceToken !== "" ? "preview" : "idle"
+      }
+    }
+  }
+
+  Process {
+    id: voiceSendProc
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var payload = null
+        try { payload = JSON.parse(this.text) } catch (e) { payload = null }
+        var abandoned = root.voiceAbandonOnSend
+        if (!payload || payload.ok !== true) {
+          root.actionError = String((payload && payload.error) || "voice note send failed")
+          if (abandoned) {
+            // The draft's row is gone, so nobody is left to press Send again.
+            // Restoring "preview" here would strand the state machine in a
+            // state no visible row can leave, and the microphone button (which
+            // requires "idle") would never come back.
+            if (root.voiceToken !== "") root.discardRecording(root.voiceToken)
+            root.resetVoice()
+          } else {
+            // wa-ctl.sh keeps the recording when a send fails, so Send is worth
+            // pressing again.
+            root.voiceState = "preview"
+            root.voiceAbandonOnSend = false
+          }
+          return
+        }
+        root.actionError = ""
+        root.resetVoice()
+      }
+    }
+  }
+
+  // Counts the take, and enforces the same ceiling wa-ctl.sh does so the
+  // display can never sit at a number the recorder has already stopped at.
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.voiceState === "recording"
+    onTriggered: {
+      root.voiceSeconds++
+      if (root.voiceSeconds >= root.voiceMaxSeconds) root.stopVoice()
+    }
+  }
+
+  // A send with no answer would otherwise pin voiceState at "sending" forever,
+  // and the microphone button — which requires "idle" — would stay disabled in
+  // every chat with no way back short of restarting the shell. The send itself
+  // is not cancelled: wacli may still deliver it, so the recording is discarded
+  // rather than re-offered, exactly as an explicit abandon does.
+  Timer {
+    interval: 60000
+    repeat: false
+    running: root.voiceState === "sending"
+    onTriggered: {
+      if (root.voiceState !== "sending") return
+      root.actionError = "The voice note is taking too long to send. wacli may still deliver it — check WhatsApp before recording it again."
+      root.voiceAbandonOnSend = true
+      root.voiceState = "idle"
+      root.voiceJid = ""
+      root.voiceName = ""
+      root.voiceSeconds = 0
+      root.voiceLevel = "ok"
+    }
+  }
+
+  // Discards get their own process rather than runAction's single slot. A
+  // discard is the deletion of microphone audio and must not be refused because
+  // a thumbnail fetch happened to be in flight: cancelVoice clears the token
+  // immediately afterwards, so a dropped call would strand the file with
+  // nothing left able to name it. Queued, the same shape as the thumbnail
+  // queue, so two in a row cannot drop one either.
+  property var voiceDiscardQueue: []
+
+  function discardRecording(token) {
+    if (!token) return
+    var q = root.voiceDiscardQueue.slice()
+    q.push(String(token))
+    root.voiceDiscardQueue = q
+    pumpDiscards()
+  }
+
+  function pumpDiscards() {
+    if (discardProc.running) return
+    if (root.voiceDiscardQueue.length === 0) return
+    var q = root.voiceDiscardQueue.slice()
+    var token = q.shift()
+    root.voiceDiscardQueue = q
+    discardProc.command = [root.ctlScript, "voice-discard", token]
+    discardProc.running = true
+  }
+
+  Process {
+    id: discardProc
+    running: false
+    // Nothing to surface: the user asked for this file to go away, and a
+    // failure to unlink it is not something they can act on.
+    stdout: StdioCollector { onStreamFinished: { } }
+    onRunningChanged: if (!running) Qt.callLater(root.pumpDiscards)
+  }
+
+  function resetVoice() {
+    root.voiceState = "idle"
+    root.voiceJid = ""
+    root.voiceName = ""
+    root.voiceToken = ""
+    root.voiceSeconds = 0
+    root.voiceLevel = "ok"
+    root.voiceDiscardOnStop = false
+    root.voiceAbandonOnSend = false
+  }
+
+  function startVoice(jid, name) {
+    if (root.voiceState !== "idle" || recordProc.running || sendProc.running) return
+    root.actionError = ""
+    root.voiceJid = String(jid)
+    // Markup stripped at the source, like the bar label: this reaches a Text
+    // and a name is chosen by whoever is messaging you.
+    root.voiceName = String(name || jid).replace(/[<>&]/g, " ").replace(/[\r\n\t]+/g, " ")
+    root.voiceToken = ""
+    root.voiceSeconds = 0
+    root.voiceLevel = "ok"
+    root.voiceDiscardOnStop = false
+    root.voiceAbandonOnSend = false
+    root.voiceState = "recording"
+    recordProc.command = [root.ctlScript, "voice-record", String(root.voiceMaxSeconds)]
+    // Opened before the process starts: the pipe is the stop switch, and a
+    // recorder launched without one sees EOF immediately and captures nothing.
+    recordProc.stdinEnabled = true
+    recordProc.running = true
+  }
+
+  function stopVoice() {
+    if (root.voiceState !== "recording") return
+    recordProc.stdinEnabled = false
+  }
+
+  function cancelVoice() {
+    // A send already in flight is not cancelled: wacli may have delivered it
+    // already, and its own docs say not to retry such a send. It is left to
+    // finish — but the draft it belongs to is gone, and the flag tells the
+    // handler not to restore a preview row that has no chat to live in.
+    if (root.voiceState === "sending") {
+      root.voiceAbandonOnSend = true
+      return
+    }
+    if (root.voiceState === "recording") {
+      // The file does not exist yet; the flag tells the stdout handler to throw
+      // away whatever wa-ctl.sh is about to hand back.
+      root.voiceDiscardOnStop = true
+      recordProc.stdinEnabled = false
+      return
+    }
+    if (root.voiceState === "preview" && root.voiceToken !== "")
+      root.discardRecording(root.voiceToken)
+    root.resetVoice()
+  }
+
+  function playVoiceDraft() {
+    if (root.voiceState !== "preview" || root.voiceToken === "") return
+    root.runAction(["voice-play", root.voiceToken], null)
+  }
+
+  function sendVoice() {
+    if (root.voiceState !== "preview" || root.voiceToken === "") return
+    if (voiceSendProc.running) return
+    root.voiceState = "sending"
+    voiceSendProc.command = [root.ctlScript, "voice-send", root.voiceJid, root.voiceToken]
+    voiceSendProc.running = true
   }
 
   // --- thumbnail queue ------------------------------------------------------
@@ -577,6 +853,16 @@ Panel {
               ? "Playback and local transcription are both available."
               : "Playback works. Transcription needs a local speech engine (" + root.whisperDetail + ")."
             color: Util.alpha(root.barForeground, 0.7)
+            wrapMode: Text.WordWrap
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: !root.voiceAvailable
+            text: "Recording a voice reply is unavailable: " + root.voiceDetail + "."
+            textFormat: Text.PlainText
+            color: "#e0a458"
             wrapMode: Text.WordWrap
             font.pixelSize: Style.font.caption
           }
@@ -893,7 +1179,12 @@ Panel {
                     }
                   }
 
-                  // --- quick reply (text only in this version) ---------------
+                  // --- quick reply: text, plus the button that starts a
+                  // voice one. The recorder's own controls deliberately do NOT
+                  // live here: this delegate is destroyed whenever the chat
+                  // drops out of the poller's payload, which happens on the
+                  // very next poll after mark-seen. Stop and Cancel have to
+                  // outlive that, so they sit at panel scope with the Process.
                   Row {
                     id: replyRow
                     width: chatColumn.width - Style.space(16)
@@ -902,7 +1193,12 @@ Panel {
                     TextField {
                       id: replyText
                       anchors.verticalCenter: parent.verticalCenter
+                      // micBtn's share is conditional: a Row gives an invisible
+                      // child neither width nor spacing, so subtracting for one
+                      // that isn't there would leave a permanent gap at the end
+                      // of the row.
                       width: replyRow.width - sendBtn.implicitWidth - webBtn.implicitWidth
+                             - (micBtn.visible ? micBtn.implicitWidth + Style.space(6) : 0)
                              - Style.space(6) * 2
                       placeholderText: "Reply…"
                       foreground: root.barForeground
@@ -916,6 +1212,23 @@ Panel {
                           if (jid === String(chatItem.modelData.jid)) replyText.text = ""
                         }
                       }
+                    }
+                    Button {
+                      id: micBtn
+                      anchors.verticalCenter: parent.verticalCenter
+                      // Hidden rather than shown-and-failing when there is no
+                      // recorder or no Opus encoder, on the same grounds as the
+                      // Transcribe button.
+                      visible: root.voiceAvailable
+                      iconText: root.iconMic
+                      tooltipText: "Record a voice note (you can listen back before it sends)"
+                      bordered: true
+                      enabled: root.voiceState === "idle" && !sendProc.running
+                      foreground: root.barForeground
+                      accent: root.accentColor
+                      fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                      fontSize: Style.font.icon
+                      onClicked: root.startVoice(chatItem.modelData.jid, chatItem.modelData.name)
                     }
                     Button {
                       id: sendBtn
@@ -946,6 +1259,155 @@ Panel {
                 }
               }
             }
+          }
+        }
+
+        // --- voice reply, at panel scope -------------------------------------
+        // Outside the chat list on purpose. The recorder's Process lives at
+        // panel scope, and its controls have to share that lifetime: a chat
+        // delegate is destroyed the moment the chat leaves the poller's
+        // payload — which mark-seen causes on the very next poll — and a Stop
+        // button that can vanish while the microphone is still open is the one
+        // failure this feature must not have.
+        Column {
+          id: voiceArea
+          width: parent.width
+          spacing: Style.space(4)
+          visible: root.voiceState !== "idle"
+
+          PanelSeparator { width: parent.width; foreground: root.barForeground; strength: 0.08 }
+
+          Row {
+            id: recordingRow
+            width: voiceArea.width
+            spacing: Style.space(8)
+            visible: root.voiceState === "recording"
+
+            Rectangle {
+              id: recDot
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(10)
+              height: Style.space(10)
+              radius: width / 2
+              color: root.alertColor
+              SequentialAnimation on opacity {
+                running: recordingRow.visible
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.2; duration: 550; easing.type: Easing.InOutQuad }
+                NumberAnimation { to: 1.0; duration: 550; easing.type: Easing.InOutQuad }
+              }
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: recordingRow.width - recDot.width - stopBtn.implicitWidth
+                     - recCancelBtn.implicitWidth - Style.space(8) * 3
+              // voiceName is a contact or group name, so it is pinned like every
+              // other attacker-controlled string in this panel.
+              text: "Recording to " + root.voiceName + "  "
+                    + root.mmss(root.voiceSeconds) + " / " + root.mmss(root.voiceMaxSeconds)
+              textFormat: Text.PlainText
+              color: root.barForeground
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+            Button {
+              id: stopBtn
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Stop"
+              bordered: true
+              foreground: root.barForeground
+              accent: root.accentColor
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              onClicked: root.stopVoice()
+            }
+            Button {
+              id: recCancelBtn
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Cancel"
+              bordered: true
+              foreground: root.barForeground
+              accent: root.accentColor
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              onClicked: root.cancelVoice()
+            }
+          }
+
+          // Preview. Nothing has been sent at this point and nothing will be
+          // until Send is pressed here.
+          Row {
+            id: previewRow
+            width: voiceArea.width
+            spacing: Style.space(6)
+            visible: root.voiceState === "preview" || root.voiceState === "sending"
+
+            Button {
+              id: previewPlayBtn
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Play"
+              iconText: root.iconPlay
+              bordered: true
+              foreground: root.barForeground
+              accent: root.accentColor
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              onClicked: root.playVoiceDraft()
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: previewRow.width - previewPlayBtn.implicitWidth
+                     - previewCancelBtn.implicitWidth - previewSendBtn.implicitWidth
+                     - Style.space(6) * 3
+              text: "Voice note to " + root.voiceName + " · " + root.mmss(root.voiceSeconds)
+              textFormat: Text.PlainText
+              color: Util.alpha(root.barForeground, 0.7)
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+            Button {
+              id: previewCancelBtn
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Cancel"
+              tooltipText: "Discard this recording"
+              bordered: true
+              enabled: root.voiceState === "preview"
+              foreground: root.barForeground
+              accent: root.accentColor
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              onClicked: root.cancelVoice()
+            }
+            Button {
+              id: previewSendBtn
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.voiceState === "sending" ? "…" : "Send"
+              iconText: root.iconSend
+              bordered: true
+              enabled: root.voiceState === "preview"
+              foreground: root.barForeground
+              accent: root.accentColor
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              onClicked: root.sendVoice()
+            }
+          }
+
+          // A recording made from a monitor or a muted device is
+          // indistinguishable from a good one until someone plays it. Saying so
+          // here beats finding out after it has been sent. "Could not tell" is
+          // its own message rather than silence, so a failed measurement never
+          // reads as a clean recording.
+          Text {
+            width: voiceArea.width
+            visible: root.voiceState === "preview" && root.voiceLevel !== "ok"
+            text: root.voiceLevel === "silent"
+              ? "This recording sounds silent — your default input device may be a monitor rather than a microphone."
+              : "Could not check whether this recording captured any sound. Play it before sending."
+            textFormat: Text.PlainText
+            color: "#e0a458"
+            wrapMode: Text.WordWrap
+            font.pixelSize: Style.font.caption
           }
         }
       }

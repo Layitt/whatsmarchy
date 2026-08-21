@@ -21,6 +21,21 @@ command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"error":"jq is not instal
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy"
 MEDIA_CACHE="$CACHE_DIR/media"
+# Voice notes the user records here, before they are sent. Kept apart from the
+# media cache: that holds other people's attachments and is pruned lazily, this
+# holds the user's own microphone and must be emptied eagerly.
+VOICE_DIR="$CACHE_DIR/outgoing"
+# WhatsApp itself allows far longer, but this is a bar-widget quick reply, not a
+# recording studio, and an unbounded cap means a forgotten click records until
+# the disk fills. The panel counts down to the same ceiling and stops there.
+VOICE_MAX_SECONDS=120
+# Captured at the device's native rate so nothing resamples on the way in;
+# libopus takes 48 kHz directly.
+VOICE_RATE=48000
+VOICE_BYTES_PER_SEC=$((VOICE_RATE * 2))   # mono s16
+# A recording that is still on disk hours later was never sent and never
+# discarded — a crash, a logout, an OOM kill. It is microphone audio, so it goes.
+VOICE_MAX_AGE_MINUTES=180
 # Ceiling for anything handed to an image decoder, a media player, or a viewer.
 # 25 MiB is far above any preview worth showing and far below "fills the disk".
 MAX_MEDIA_BYTES=$((25 * 1024 * 1024))
@@ -239,6 +254,266 @@ cmd_send() {
 }
 
 # ---------------------------------------------------------------------------
+# voice — record a reply from the microphone, listen back, then send it.
+#
+# Same rule as the text reply: a human holds the whole loop. Recording starts
+# on a click, stops on a click, and nothing leaves this machine until the user
+# has had the chance to play it back and press Send. There is no path here that
+# records or sends without one.
+#
+# The panel never sees the recording's path. `voice-record` hands back an opaque
+# token and every later step rebuilds the path from VOICE_DIR, so no argument
+# from the QML side can point at a file this plugin did not create.
+# ---------------------------------------------------------------------------
+# Kept separate from ensure_voice_dir so `voice-status` can call it too. The
+# panel probes voice-status on every open, so a recording orphaned by a crash is
+# swept the next time the panel is looked at, rather than only if and when the
+# user happens to record again. Symlinks are swept alongside files: a stray
+# `.send-*` link left behind by a failed hand-off is not a regular file.
+sweep_voice_dir() {
+  [[ -d "$VOICE_DIR" && ! -L "$VOICE_DIR" ]] || return 0
+  find "$VOICE_DIR" -maxdepth 1 \( -type f -o -type l \) \
+    -mmin "+$VOICE_MAX_AGE_MINUTES" -delete 2>/dev/null
+  return 0
+}
+
+ensure_voice_dir() {
+  # Refused rather than followed, the same way lib.sh refuses a symlinked config
+  # file: `mkdir -p` is perfectly happy with a symlink to a directory, and the
+  # chmod below — plus every recording after it — would land on its target.
+  [[ -L "$VOICE_DIR" ]] && emit_error "refusing to use a symlinked $VOICE_DIR"
+  mkdir -p -- "$VOICE_DIR" 2>/dev/null || emit_error "cannot create $VOICE_DIR"
+  chmod 700 -- "$CACHE_DIR" "$VOICE_DIR" 2>/dev/null
+  sweep_voice_dir
+  return 0
+}
+
+# parecord is tried first even though pw-record is the PipeWire-native tool:
+# pw-record asks the session manager for a capture node and will not link to a
+# monitor, so on a machine whose chosen default input *is* a monitor it fails
+# outright with "no target node available". parecord takes whatever the server
+# reports as the default source, which is the device the user actually picked in
+# their audio settings. Neither is given an explicit --target: choosing the
+# input device is the desktop's job, not this widget's.
+pick_recorder() {
+  local bin
+  for bin in parecord pw-record; do
+    command -v "$bin" >/dev/null 2>&1 && { printf '%s' "$bin"; return 0; }
+  done
+  return 1
+}
+
+have_libopus() {
+  # ffmpeg also ships a native "opus" encoder, but it is the experimental one;
+  # WhatsApp voice notes are libopus territory, so the check is specific.
+  # Not `grep -q`: this script runs under `set -o pipefail`, and a -q that exits
+  # on the first match SIGPIPEs ffmpeg, which then fails the whole pipeline —
+  # reporting a perfectly good encoder as missing.
+  ffmpeg -hide_banner -encoders 2>/dev/null | grep '[[:space:]]libopus[[:space:]]' >/dev/null
+}
+
+cmd_voice_status() {
+  local rec
+  # Not ensure_voice_dir: its mkdir failure path emits an error, which would
+  # turn a permissions problem into "voice replies are unavailable" instead of
+  # saying what is actually wrong.
+  sweep_voice_dir
+  command -v ffmpeg >/dev/null 2>&1 \
+    || emit_ok --argjson available false --arg reason "ffmpeg" \
+               --arg detail "ffmpeg is not installed"
+  have_libopus \
+    || emit_ok --argjson available false --arg reason "opus" \
+               --arg detail "this ffmpeg has no libopus encoder"
+  rec="$(pick_recorder)" \
+    || emit_ok --argjson available false --arg reason "recorder" \
+               --arg detail "no recorder found (pw-record from pipewire, or parecord)"
+  emit_ok --argjson available true --arg recorder "$rec" \
+          --argjson maxSeconds "$VOICE_MAX_SECONDS"
+}
+
+# Records until the caller closes this script's stdin, or until the ceiling.
+#
+# stdin is the stop channel, and nothing is ever read from it. That is not a
+# trick for its own sake: it makes "the panel went away" and "the user pressed
+# Stop" the same event. A recorder that had to be stopped by a second, separate
+# command would keep the microphone open if the shell that was going to send it
+# ever died — and a hot microphone nobody can see is the one failure this
+# feature is not allowed to have.
+cmd_voice_record() {
+  local max="${1-}" rec out raw tok rec_pid size secs peak silent
+  is_uint "$max" || max="$VOICE_MAX_SECONDS"
+  (( max < 1 )) && max=1
+  (( max > VOICE_MAX_SECONDS )) && max="$VOICE_MAX_SECONDS"
+  require_cmd ffmpeg
+  have_libopus || emit_error "this ffmpeg has no libopus encoder"
+  rec="$(pick_recorder)" || emit_error "no recorder found (pw-record from pipewire, or parecord)"
+  ensure_voice_dir
+
+  out="$(mktemp "$VOICE_DIR/rec-XXXXXXXXXXXX.ogg")" || emit_error "cannot create a recording file"
+  chmod 600 -- "$out" 2>/dev/null
+  tok="${out##*/rec-}"; tok="${tok%.ogg}"
+  is_rec_token "$tok" || { rm -f -- "$out"; emit_error "cannot create a recording file"; }
+  # Raw mono PCM, so there is no header to finalise: a capture cut off at any
+  # instant is still exactly the audio recorded up to that instant.
+  # mktemp again rather than a name derived from $tok: an O_EXCL create cannot
+  # be talked into following a symlink someone left in the directory first,
+  # which a plain `> "$VOICE_DIR/.raw-$tok"` could.
+  raw="$(mktemp "$VOICE_DIR/.raw-XXXXXXXXXXXX")" \
+    || { rm -f -- "$out"; emit_error "cannot create the capture buffer"; }
+  chmod 600 -- "$raw" 2>/dev/null
+
+  # Armed the instant the buffer exists and never disarmed: the raw PCM is
+  # microphone audio and must not survive this process however it ends.
+  trap 'rm -f -- "$raw" 2>/dev/null' EXIT
+
+  rec_pid=""
+  # Signals reach this script, not the recorder, so the microphone is closed
+  # explicitly on every exit path. The half-written recording goes with it —
+  # a killed recording was never confirmed by anyone. emit_error rather than a
+  # bare exit: the panel parses stdout, and this script's contract is one JSON
+  # object, never an empty stream that reads as a parse failure. This stays
+  # armed through the encode below, which is seconds of real time on a long
+  # take and used to be an unguarded window.
+  trap 'kill -TERM "$rec_pid" 2>/dev/null; rm -f -- "$out" 2>/dev/null; emit_error "recording was interrupted"' TERM INT HUP QUIT
+
+  # `timeout` is the backstop for the one signal bash cannot trap. Every other
+  # stop path runs *in this script* — the read below, the kill after it, the
+  # trap above — so a SIGKILL here (OOM, `pkill -9`) would otherwise orphan the
+  # recorder onto init with the microphone still open and nothing to close it:
+  # it never reads stdin, so the EOF that stops everything else means nothing to
+  # it. With this it ends on its own even with no parent left alive. timeout
+  # forwards SIGTERM to its child, so the explicit kill below still works.
+  # --latency bounds how much audio is still in flight when that kill lands. At
+  # the default it is most of a second, and that second is the end of the user's
+  # sentence.
+  case "$rec" in
+    parecord)
+      timeout -k 2 "$(( max + 5 ))" \
+        parecord --raw --rate="$VOICE_RATE" --channels=1 --format=s16le \
+          --latency-msec=100 "$raw" >/dev/null 2>&1 &
+      ;;
+    pw-record)
+      timeout -k 2 "$(( max + 5 ))" \
+        pw-record --raw --rate="$VOICE_RATE" --channels=1 --format=s16 \
+          --latency=100ms "$raw" >/dev/null 2>&1 &
+      ;;
+  esac
+  rec_pid=$!
+
+  # Returns on EOF (the panel closed stdin), on any line written to it, or at
+  # the ceiling. All three mean the same thing: stop now.
+  read -r -t "$max" _ <&0
+
+  kill -TERM "$rec_pid" 2>/dev/null
+  wait "$rec_pid" 2>/dev/null
+  rec_pid=""
+
+  size="$(stat -c '%s' -- "$raw" 2>/dev/null || printf '0')"
+  is_uint "$size" || size=0
+  # A quarter second of audio is a misclick, and an empty capture usually means
+  # there was no usable input device at all. Either way there is nothing worth
+  # offering to send, and saying so beats a preview that plays nothing.
+  if (( size < VOICE_BYTES_PER_SEC / 4 )); then
+    rm -f -- "$out"
+    emit_error "nothing was captured — check which input device your audio settings default to"
+  fi
+  secs=$(( size / VOICE_BYTES_PER_SEC ))
+
+  # -application voip is the Opus mode tuned for speech, which is what a voice
+  # note is. 32 kbit/s mono is comfortably transparent for it.
+  ffmpeg -nostdin -loglevel error -y -f s16le -ar "$VOICE_RATE" -ac 1 -i "$raw" \
+    -c:a libopus -b:a 32k -vbr on -application voip -f ogg "$out" >/dev/null 2>&1 \
+    || { rm -f -- "$out"; emit_error "could not encode the recording (ffmpeg failed)"; }
+
+  # A recording that captured only silence is the common outcome when the
+  # default input is a monitor or a muted device, and it is indistinguishable
+  # from a good one until someone plays it. The panel says so next to Play
+  # rather than letting the user find out after sending.
+  #
+  # Three states, not two. If the measurement itself fails — ffmpeg errors, the
+  # log format shifts — folding that into `false` would silently retire the one
+  # warning whose whole job is to stop a blank note being sent. "Unknown" says
+  # so instead. (An all-zero capture reports max_volume: -91.0 dB, not -inf, so
+  # the ordinary silent case does parse.)
+  silent=null
+  peak="$(ffmpeg -nostdin -hide_banner -f s16le -ar "$VOICE_RATE" -ac 1 -i "$raw" \
+            -af volumedetect -f null - 2>&1 \
+          | sed -n 's/.*max_volume:[[:space:]]*\(-\{0,1\}[0-9.]*\)[[:space:]]*dB.*/\1/p' | tail -n 1)"
+  if [[ -n "$peak" ]]; then
+    # Piped rather than `awk -v p=…`: the peak level is a measurement of the
+    # user's microphone, and this codebase does not put microphone data on a
+    # command line even when it is only one number.
+    if printf '%s\n' "$peak" | awk '{ exit !($1 <= -50) }'; then silent=true; else silent=false; fi
+  fi
+
+  emit_ok --arg token "$tok" --argjson seconds "$secs" --argjson silent "$silent"
+}
+
+cmd_voice_play() {
+  local tok="${1-}" path
+  is_rec_token "$tok" || emit_error "invalid recording id"
+  path="$VOICE_DIR/rec-$tok.ogg"
+  # -L as well as -f: VOICE_DIR is the user's own, but a symlink dropped in it
+  # would otherwise turn Play into "open whatever this points at".
+  [[ -f "$path" && ! -L "$path" && -s "$path" ]] || emit_error "that recording is no longer available"
+  spawn_player "$path"
+  emit_ok --arg token "$tok"
+}
+
+cmd_voice_send() {
+  local jid="${1-}" tok="${2-}" path staged out rc
+  is_jid "$jid"       || emit_error "invalid chat id"
+  is_rec_token "$tok" || emit_error "invalid recording id"
+  require_cmd wacli
+  path="$VOICE_DIR/rec-$tok.ogg"
+  [[ -f "$path" && ! -L "$path" && -s "$path" ]] || emit_error "that recording is no longer available"
+
+  # That check describes what $path is *now*. `rec-<token>.ogg` is a name the
+  # panel knows and could be predicted, so another process running as this user
+  # could still swap it for a symlink in the gap before wacli opens it — turning
+  # Send into "hand an arbitrary file to a WhatsApp contact". Renaming it under a
+  # name nothing has ever seen closes the window from both ends: a swap before
+  # the rename is caught by the re-check (mv renames a symlink, it does not
+  # follow it), and after the rename there is no name left to race.
+  staged="$(mktemp "$VOICE_DIR/.send-XXXXXXXXXXXX.ogg")" || emit_error "cannot stage the recording"
+  mv -f -- "$path" "$staged" 2>/dev/null \
+    || { rm -f -- "$staged"; emit_error "cannot stage the recording"; }
+  [[ -f "$staged" && ! -L "$staged" && -s "$staged" ]] \
+    || { rm -f -- "$staged"; emit_error "that recording is no longer available"; }
+
+  # `send voice` is wacli's shortcut for `send file --ptt`; it wants OGG/Opus,
+  # which is exactly what cmd_voice_record produced. The mime is spelled out
+  # because WhatsApp only renders a voice bubble when the codecs parameter is
+  # present — a bare audio/ogg arrives as a file attachment instead.
+  # Unlike a reply body, the arguments here are a path this plugin generated and
+  # a JID the panel already puts on this script's own command line, so nothing
+  # new is exposed in `ps` by passing them.
+  out="$(wacli send voice --to "$jid" --file "$staged" --mime 'audio/ogg; codecs=opus' --json 2>&1)"
+  rc=$?
+  if (( rc != 0 )); then
+    # Moved back under the name the panel knows, so Send can be pressed again.
+    # If even that fails the recording is dropped rather than left under a name
+    # nothing can ever reach.
+    mv -f -- "$staged" "$path" 2>/dev/null || rm -f -- "$staged"
+    emit_error "send failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+  fi
+  rm -f -- "$staged"
+  emit_ok --argjson sent true
+}
+
+cmd_voice_discard() {
+  local tok="${1-}" path removed=false
+  is_rec_token "$tok" || emit_error "invalid recording id"
+  path="$VOICE_DIR/rec-$tok.ogg"
+  [[ -L "$path" ]] && emit_error "refusing to follow a symlink in $VOICE_DIR"
+  # Reported honestly rather than always true, so "deleted it" and "there was
+  # nothing there" stay distinguishable in a log or a bug report.
+  [[ -e "$path" ]] && removed=true
+  rm -f -- "$path"
+  emit_ok --argjson discarded "$removed"
+}
+
+# ---------------------------------------------------------------------------
 # media — make a message's attachment available as a local file.
 # ---------------------------------------------------------------------------
 
@@ -373,21 +648,18 @@ cmd_media() {
   emit_ok --arg path "$path"
 }
 
-cmd_play() {
-  local jid="${1-}" msg_id="${2-}" path
-  is_jid "$jid"       || emit_error "invalid chat id"
-  is_msg_id "$msg_id" || emit_error "invalid message id"
-  resolve_media_path "$jid" "$msg_id"
-  path="$RESOLVED_MEDIA"
-  [[ -n "$path" && -s "$path" ]] || emit_error "attachment is not available locally"
-
-  # Plain playback of the raw file — no transcoding, no extra dependency
-  # beyond a player that is already on essentially every desktop.
-  # The bytes are attacker-supplied and mpv identifies a file by content, not by
-  # the extension this cache gave it: an "audio/mpeg" attachment whose body is
-  # `#EXTM3U` + a URL would otherwise be opened as a playlist and its entries
-  # fetched on a Play click. --no-config also keeps the user's mpv.conf and any
-  # user Lua scripts out of the picture.
+# Plain playback of the raw file — no transcoding, no extra dependency beyond a
+# player that is already on essentially every desktop.
+# The bytes are attacker-supplied and mpv identifies a file by content, not by
+# the extension this cache gave it: an "audio/mpeg" attachment whose body is
+# `#EXTM3U` + a URL would otherwise be opened as a playlist and its entries
+# fetched on a Play click. --no-config also keeps the user's mpv.conf and any
+# user Lua scripts out of the picture. Recordings made here go through the same
+# invocation: the flags cost nothing and one playback path is one path to audit.
+# Called only from a cmd_* body in the main shell, so its emit_error is the
+# script's whole answer rather than a string captured in a substitution.
+spawn_player() {
+  local path="$1"
   if command -v mpv >/dev/null 2>&1; then
     setsid mpv --no-config --no-video --really-quiet --no-terminal \
       --load-unsafe-playlists=no --demuxer=lavf -- "$path" >/dev/null 2>&1 &
@@ -398,6 +670,16 @@ cmd_play() {
   else
     emit_error "no audio player found — install mpv (or ffmpeg for ffplay)"
   fi
+}
+
+cmd_play() {
+  local jid="${1-}" msg_id="${2-}" path
+  is_jid "$jid"       || emit_error "invalid chat id"
+  is_msg_id "$msg_id" || emit_error "invalid message id"
+  resolve_media_path "$jid" "$msg_id"
+  path="$RESOLVED_MEDIA"
+  [[ -n "$path" && -s "$path" ]] || emit_error "attachment is not available locally"
+  spawn_player "$path"
   emit_ok --arg path "$path"
 }
 
@@ -564,6 +846,11 @@ case "${1-}" in
   mark-seen)       shift; cmd_mark_seen "$@" ;;
   mark-all-seen)   shift; cmd_mark_all_seen "$@" ;;
   send)            shift; cmd_send "$@" ;;
+  voice-status)    shift; cmd_voice_status "$@" ;;
+  voice-record)    shift; cmd_voice_record "$@" ;;
+  voice-play)      shift; cmd_voice_play "$@" ;;
+  voice-send)      shift; cmd_voice_send "$@" ;;
+  voice-discard)   shift; cmd_voice_discard "$@" ;;
   media)           shift; cmd_media "$@" ;;
   play)            shift; cmd_play "$@" ;;
   open)            shift; cmd_open "$@" ;;

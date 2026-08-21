@@ -5,7 +5,8 @@ WhatsApp notifications in the [Omarchy](https://omarchy.org) bar, built on
 
 The bar tells you **who is waiting and how many messages** — never what they
 said. Click for previews, image thumbnails, voice-note playback, optional local
-transcription, and a quick text reply.
+transcription, and a quick reply — typed, or recorded as a voice note you listen
+back to before it sends.
 
 ## How it works
 
@@ -32,6 +33,7 @@ nothing here re-implements the WhatsApp protocol.
 | `wacli sync --follow` running | keeps the database fresh | see below |
 | `sqlite3`, `jq` | read the local mirror | present on a standard Omarchy install |
 | `mpv` (or `ffplay`, `paplay`) | voice-note / video playback | optional |
+| `parecord` (or `pw-record`) + `ffmpeg` with `libopus` | recording a voice reply | optional; the microphone button is hidden when missing |
 | `whisper-cpp` + `ffmpeg` | voice-note transcription | optional, opt-in, never auto-installed |
 
 ## Install
@@ -137,6 +139,17 @@ read it. That is why it is not the default.
 - **Reply** — type and press Enter. This sends through
   `wacli send text`. It is always you typing and pressing send: the plugin has
   no automatic, scheduled, or agent-initiated send path of any kind.
+- **Voice reply** — the microphone button records from your default input
+  device. Press **Stop**, then **Play** to hear it back, then **Send** or
+  **Cancel**. It never sends on stop: recording and sending are two separate
+  decisions. Recordings are capped at two minutes, encoded to OGG/Opus, and sent
+  through `wacli send voice` (WhatsApp's own voice-note format, so it arrives as
+  a playable bubble rather than a file attachment).
+
+  Choosing the input device is your audio settings' job, not this widget's — it
+  records from whatever is the default. If the preview warns that the recording
+  sounds silent, your default input is probably a monitor rather than a
+  microphone; `pactl info` will say which.
 
 ### Known limitation: no per-chat deep link
 
@@ -186,6 +199,10 @@ Point at a different model with `WHATSMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
   - `wacli send text` takes the recipient and the message body as command-line
     arguments, so during the second or so a reply is in flight they appear in
     `ps`. That is wacli's interface and cannot be avoided from here.
+  - `wacli send voice` likewise takes the recipient and the recording's path as
+    arguments. The path names a file in this plugin's own cache and the JID is
+    already on the helper's command line, so the send adds no exposure beyond
+    what the line below describes.
   - The panel invokes the helper as `wa-ctl.sh <action> <chat-jid> …`, so the
     JID of the chat you are acting on — a phone number, or a group id — is in
     that short-lived process's own arguments. Message content, the allow-list,
@@ -195,6 +212,26 @@ Point at a different model with `WHATSMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
   WhatsApp-supplied filenames are never used to build a path.
 - Downloaded media is cached `0600` under
   `~/.cache/omarchy-whatsmarchy/media/`. Delete that directory to clear it.
+- The microphone is only ever open while the recording controls are on screen.
+  The recorder is stopped by the panel *closing its pipe*, so "the panel went
+  away" and "the user pressed Stop" are the same event — closing the panel,
+  collapsing the chat, or the shell quitting all end the recording, not just the
+  Stop button. Those controls sit outside the message list precisely so that a
+  refresh cannot take them away while the microphone is still open.
+  For the one signal a script cannot catch — `SIGKILL`, an OOM kill — the
+  recorder is additionally launched under `timeout`, so it stops on its own even
+  when nothing is left alive to stop it. Every recording is capped at two
+  minutes regardless.
+- Recordings waiting to be sent live `0600` in
+  `~/.cache/omarchy-whatsmarchy/outgoing/` — a directory that is refused outright
+  if it is ever replaced by a symlink — and are deleted on Send or Cancel.
+  Anything that survives a crash is swept once it is three hours old, on the next
+  open of the panel or the next recording, whichever comes first.
+- The panel never learns a recording's path: it gets an opaque token back and
+  hands that to play/send/discard, so no value crossing that boundary can name a
+  file this plugin did not create. Immediately before the file is handed to
+  `wacli` it is renamed to a fresh random name, so the path being sent is one
+  that was never published to anything and cannot be swapped underneath it.
 - Nothing is installed, updated, or removed from your system without an
   explicit typed confirmation in a terminal.
 

@@ -157,3 +157,12 @@ is_msg_id() {
 is_uint() {
   [[ "${1-}" =~ ^[0-9]{1,19}$ ]]
 }
+
+is_rec_token() {
+  # Handle for an outgoing voice recording this plugin made itself. The panel
+  # never learns the file's path — it gets this token back and hands it to
+  # play/send/discard, which rebuild the path from a fixed directory. A token
+  # that cannot express a separator or a dot cannot escape that directory, so
+  # "send this recording" can never become "send this arbitrary file".
+  [[ "${1-}" =~ ^[A-Za-z0-9]{6,32}$ ]]
+}
