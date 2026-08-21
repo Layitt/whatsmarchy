@@ -148,8 +148,10 @@ FROM (
 "
 
 # -readonly opens the connection SQLITE_OPEN_READONLY: the poller physically
-# cannot mutate wacli's mirror, even if a future query were wrong.
-rows="$(sqlite3 -readonly -noheader -batch -- "$DB" "$SQL" 2>&1)"
+# cannot mutate wacli's mirror, even if a future query were wrong. The query
+# text goes in over stdin rather than as an argument, so it never appears in
+# this process's /proc/<pid>/cmdline while the read is in flight.
+rows="$(printf '%s' "$SQL" | sqlite3 -readonly -noheader -batch -- "$DB" 2>&1)"
 sqlite_status=$?
 if (( sqlite_status != 0 )); then
   emit_error "sqlite read failed: ${rows:-unknown error}"
@@ -164,12 +166,19 @@ scanned="$(printf '%s' "$rows" | jq 'length')"
 truncated=false
 [[ "$scanned" == "$SCAN_LIMIT" ]] && truncated=true
 
+# The config reaches jq through a pipe (--slurpfile on a process substitution),
+# never through --argjson. A jq argument lives in /proc/<pid>/cmdline and is
+# readable by every other process running as this user for as long as the call
+# takes — and this config holds the allow-list and the seen map, which are the
+# phone numbers of the people the user talks to. Only non-sensitive scalars
+# stay on the command line.
 printf '%s' "$rows" | jq -c \
-  --argjson cfg "$CONFIG" \
+  --slurpfile cfgFile <(printf '%s' "$CONFIG") \
   --argjson limit "$PREVIEW_LIMIT" \
   --argjson syncRunning "$sync_running" \
   --argjson truncated "$truncated" '
-  ($cfg.seenAll) as $seenAll
+  ($cfgFile[0])    as $cfg
+  | ($cfg.seenAll) as $seenAll
   | ($cfg.seen)  as $seen
   | ($cfg.mode)  as $mode
   | ($cfg.allow | map({key: ., value: true}) | from_entries) as $allowSet

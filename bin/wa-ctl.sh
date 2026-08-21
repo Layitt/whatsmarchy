@@ -29,6 +29,13 @@ ensure_cache() {
 
 emit_ok() { jq -cn "$@" '$ARGS.named + {ok: true}'; exit 0; }
 
+# jq arguments land in /proc/<pid>/cmdline, readable by any other process
+# running as this user for the life of the call. Chat JIDs are phone numbers and
+# the allow-list is the user's contact selection, so any jq invocation carrying
+# them takes them through a pipe instead. Usage:
+#   cfg="$(read_config | jq -c --slurpfile a <(json_arg "$doc") '...$a[0]...')"
+json_arg() { printf '%s' "$1"; }
+
 # ---------------------------------------------------------------------------
 # recipients — option list for the panel's "who may notify me" picker.
 # Reads chats/contacts/groups straight from the mirror, read-only.
@@ -42,7 +49,7 @@ cmd_recipients() {
 
   # Ordered the way the picker should read: most recently active first, so the
   # chats a user actually wants to allow are at the top of a long list.
-  rows="$(sqlite3 -readonly -noheader -batch -- "$db" "
+  rows="$(sqlite3 -readonly -noheader -batch -- "$db" <<'SQL'
     SELECT COALESCE(json_group_array(json_object(
       'value', jid, 'label', label, 'description', descr
     )), '[]')
@@ -66,7 +73,8 @@ cmd_recipients() {
       ORDER BY COALESCE(c.last_message_ts, 0) DESC
       LIMIT 500
     );
-  " 2>&1)" || emit_error "sqlite read failed: $rows"
+SQL
+2>&1)" || emit_error "sqlite read failed: $rows"
 
   printf '%s' "$rows" | jq -e 'type == "array"' >/dev/null 2>&1 \
     || emit_error "unexpected recipient query result"
@@ -115,8 +123,11 @@ cmd_set_allow() {
     is_jid "$jid" || emit_error "refusing to store malformed JID"
   done < <(printf '%s' "$allow" | jq -r '.[]')
 
-  cfg="$(read_config | jq -c --argjson a "$allow" '.allow = $a')" || emit_error "could not update config"
+  cfg="$(read_config | jq -c --slurpfile a <(json_arg "$allow") '.allow = $a[0]')" \
+    || emit_error "could not update config"
   write_config "$cfg" || emit_error "cannot write $(config_path)"
+  # Only the count is reported back; echoing the list would put it straight
+  # back on a command line via emit_ok.
   emit_ok --argjson count "$(printf '%s' "$allow" | jq 'length')"
 }
 
@@ -127,10 +138,10 @@ cmd_mark_seen() {
   local jid="${1-}" ts="${2-}" cfg
   is_jid "$jid" || emit_error "invalid chat id"
   is_uint "$ts" || emit_error "invalid timestamp"
-  cfg="$(read_config | jq -c --arg j "$jid" --argjson t "$ts" \
-    '.seen[$j] = ([(.seen[$j] // 0), $t] | max)')" || emit_error "could not update config"
+  cfg="$(read_config | jq -c --slurpfile j <(json_arg "$(json_string "$jid")") --argjson t "$ts" \
+    '.seen[$j[0]] = ([(.seen[$j[0]] // 0), $t] | max)')" || emit_error "could not update config"
   write_config "$cfg" || emit_error "cannot write $(config_path)"
-  emit_ok --arg jid "$jid"
+  emit_ok --argjson done true
 }
 
 cmd_mark_all_seen() {
@@ -164,11 +175,16 @@ cmd_send() {
   # `--` is not accepted by the wacli flag parser, but --message takes its
   # value as a separate argv entry, so a body starting with '-' is still
   # passed as data rather than parsed as a flag.
+  # NOTE: `wacli` takes the recipient and the message body as command-line
+  # arguments, so for the second or so the send is in flight they are visible in
+  # `ps` to other processes running as this user. That is wacli's interface and
+  # cannot be avoided from here; it is called out in the README rather than
+  # papered over. Everything on *this* side of the boundary stays off argv.
   out="$(wacli send text --to "$jid" --message "$msg" --json 2>&1)"
   if (( $? != 0 )); then
     emit_error "send failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
-  emit_ok --arg jid "$jid"
+  emit_ok --argjson sent true
 }
 
 # ---------------------------------------------------------------------------
@@ -214,12 +230,14 @@ resolve_media_path() {
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
 
-  # Parameterised through sqlite3's -cmd .param binding rather than string
-  # interpolation, so a JID or message ID can never be read as SQL.
-  row="$(sqlite3 -readonly -noheader -batch \
-    -cmd ".parameter set :jid '$(printf '%s' "$jid" | sed "s/'/''/g")'" \
-    -cmd ".parameter set :mid '$(printf '%s' "$msg_id" | sed "s/'/''/g")'" \
-    -- "$db" "
+  # Bound as SQL parameters rather than interpolated into the query, so a JID
+  # or message ID can never be read as SQL. Both the .parameter lines and the
+  # query go in over stdin: a chat JID is a phone number, and sqlite3's argv is
+  # readable by any other process running as this user.
+  local esc_jid="${jid//\'/\'\'}" esc_mid="${msg_id//\'/\'\'}"
+  row="$( { printf ".parameter set :jid '%s'\n" "$esc_jid"
+            printf ".parameter set :mid '%s'\n" "$esc_mid"
+            cat <<'SQL'
       SELECT json_object(
         'localPath', COALESCE(local_path,''),
         'mime',      COALESCE(mime_type,''),
@@ -229,7 +247,9 @@ resolve_media_path() {
       WHERE chat_jid = :jid AND msg_id = :mid
         AND deleted_at IS NULL AND payload_purged_at IS NULL
       LIMIT 1;
-    " 2>&1)" || emit_error "sqlite read failed: $row"
+SQL
+          } | sqlite3 -readonly -noheader -batch -- "$db" 2>&1 )" \
+    || emit_error "sqlite read failed: $row"
   [[ -n "$row" ]] || emit_error "message not found in the local store"
 
   local_path="$(printf '%s' "$row" | jq -r '.localPath')"
@@ -423,7 +443,10 @@ cmd_transcribe() {
 
   text="$(printf '%s' "$text" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')"
   [[ -n "$text" ]] || emit_error "transcription produced no text"
-  emit_ok --arg text "$text" --arg tool "$tool"
+  # Piped, not passed with --arg: a transcript is the literal contents of a
+  # private voice note and must not sit in jq's /proc/<pid>/cmdline.
+  printf '%s' "$text" | jq -Rs --arg tool "$tool" '{ok: true, tool: $tool, text: .}'
+  exit 0
 }
 
 cmd_install_whisper() {

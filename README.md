@@ -175,9 +175,16 @@ Point at a different model with `WAMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
 - `session.db` — wacli's WhatsApp encryption keys — is never read.
 - Message text never reaches the bar, and never reaches a desktop notification
   unless you explicitly select `Sender and preview`.
-- Reply text and the allow-list are passed to the helper script over **stdin**,
-  never as command-line arguments, so they do not appear in `ps` output for
-  other processes running as you.
+- Nothing private reaches a command line on this plugin's side of the boundary.
+  Reply text and the allow-list arrive over **stdin**; SQL queries, chat JIDs,
+  the config, and voice-note transcripts are piped into `sqlite3` and `jq`
+  rather than passed as arguments. Process arguments are readable by every
+  other process running as you via `/proc/<pid>/cmdline`, so none of this is
+  put there.
+  **One exception, outside this plugin's control:** `wacli send text` takes the
+  recipient and the message body as command-line arguments. For the second or
+  so a reply is in flight, they are visible in `ps` to other processes running
+  as you. That is wacli's interface; it is stated here rather than glossed over.
 - Attachment paths recorded in the database are verified to resolve inside
   wacli's own store before any file is handed to a player or viewer;
   WhatsApp-supplied filenames are never used to build a path.
