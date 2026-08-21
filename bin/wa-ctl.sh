@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# User-initiated actions for the Wamarchy Omarchy bar widget.
+# User-initiated actions for the Whatsmarchy Omarchy bar widget.
 #
 # Everything in here runs because a human clicked something in the panel. The
 # poller (wa-status.sh) is strictly read-only; this script is the only place
@@ -19,7 +19,7 @@ SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"error":"jq is not installed"}\n'; exit 0; }
 
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-wamarchy"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy"
 MEDIA_CACHE="$CACHE_DIR/media"
 # Ceiling for anything handed to an image decoder, a media player, or a viewer.
 # 25 MiB is far above any preview worth showing and far below "fills the disk".
@@ -440,11 +440,11 @@ cmd_webapp() {
 # separate subcommand that opens a terminal and asks the user to confirm.
 # ---------------------------------------------------------------------------
 find_whisper_model() {
-  [[ -n "${WAMARCHY_WHISPER_MODEL:-}" && -r "${WAMARCHY_WHISPER_MODEL}" ]] && {
-    printf '%s' "$WAMARCHY_WHISPER_MODEL"; return 0; }
+  [[ -n "${WHATSMARCHY_WHISPER_MODEL:-}" && -r "${WHATSMARCHY_WHISPER_MODEL}" ]] && {
+    printf '%s' "$WHATSMARCHY_WHISPER_MODEL"; return 0; }
   local dir f
   for dir in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/wamarchy/models" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/whatsmarchy/models" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/whisper.cpp/models" \
     "$HOME/.cache/whisper.cpp/models" \
     "/usr/share/whisper.cpp/models"

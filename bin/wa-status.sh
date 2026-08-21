@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only WhatsApp "what's new" poller for the Wamarchy Omarchy bar widget.
+# Read-only WhatsApp "what's new" poller for the Whatsmarchy Omarchy bar widget.
 #
 # Reads wacli's local SQLite mirror (wacli.db) with a read-only connection and
 # reports which allowed chats have messages the user has not acknowledged in

@@ -1,4 +1,4 @@
-# Wamarchy
+# Whatsmarchy
 
 WhatsApp notifications in the [Omarchy](https://omarchy.org) bar, built on
 [wacli](https://github.com/openclaw/wacli).
@@ -10,7 +10,7 @@ transcription, and a quick text reply.
 ## How it works
 
 `wacli` pairs as a linked WhatsApp Web device and mirrors your messages into a
-local SQLite database. Wamarchy **reads that database, read-only** — it never
+local SQLite database. Whatsmarchy **reads that database, read-only** — it never
 connects to WhatsApp itself, never opens `session.db` (your encryption keys),
 and never writes anything into wacli's store.
 
@@ -18,7 +18,7 @@ and never writes anything into wacli's store.
 your phone ──► WhatsApp ──► wacli sync --follow ──► ~/.local/state/wacli/wacli.db
                                                           │ read-only
                                                           ▼
-                                                   Wamarchy bar widget
+                                                   Whatsmarchy bar widget
 ```
 
 Outgoing actions (quick reply, media download) shell out to `wacli` itself, so
@@ -76,15 +76,15 @@ wacli chats list
 
 ### 2. Keep the local mirror up to date
 
-Wamarchy reads a local database; something has to fill it. Run wacli's sync in
+Whatsmarchy reads a local database; something has to fill it. Run wacli's sync in
 follow mode as a user service. A ready-made unit is in `contrib/`:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp contrib/wamarchy-sync.service ~/.config/systemd/user/
+cp contrib/whatsmarchy-sync.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now wamarchy-sync
-systemctl --user status wamarchy-sync
+systemctl --user enable --now whatsmarchy-sync
+systemctl --user status whatsmarchy-sync
 ```
 
 The panel tells you when sync is not running, rather than quietly showing a
@@ -93,10 +93,10 @@ frozen count.
 ### 3. Install the plugin
 
 ```bash
-omarchy plugin add https://github.com/boyoyooo/wamarchy
+omarchy plugin add https://github.com/boyoyooo/whatsmarchy
 ```
 
-Then add the **Wamarchy** widget to your bar from Omarchy's bar settings.
+Then add the **Whatsmarchy** widget to your bar from Omarchy's bar settings.
 
 ## Configuring who may notify you
 
@@ -107,7 +107,7 @@ Open the panel and click the gear. Three modes:
 - **Chosen chats** — pick exactly which contacts and groups may notify you,
   from a searchable list populated live from your synced chats.
 
-The selection is stored at `~/.config/omarchy/wamarchy/config.json`
+The selection is stored at `~/.config/omarchy/whatsmarchy/config.json`
 (`0600`, outside the plugin folder, so updating the plugin never touches it).
 
 ## Configuring how much is shown
@@ -148,7 +148,7 @@ exposes no stable URL for an existing conversation.
 ## Voice-note transcription (optional)
 
 Playback needs nothing beyond a media player. Transcription needs a local
-speech engine. Wamarchy detects `whisper-cli` / `whisper-cpp` (with a `ggml-*`
+speech engine. Whatsmarchy detects `whisper-cli` / `whisper-cpp` (with a `ggml-*`
 model) or OpenAI's `whisper`, and only shows a `Transcribe` button when one is
 actually present.
 
@@ -159,14 +159,14 @@ asks you to type `yes` before anything is changed. You can also do it yourself:
 
 ```bash
 sudo pacman -S --needed whisper-cpp ffmpeg
-mkdir -p ~/.local/share/wamarchy/models
-curl -L -o ~/.local/share/wamarchy/models/ggml-base.bin \
+mkdir -p ~/.local/share/whatsmarchy/models
+curl -L -o ~/.local/share/whatsmarchy/models/ggml-base.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
 ```
 
 Transcription runs entirely on your machine. Audio is never uploaded anywhere.
 
-Point at a different model with `WAMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
+Point at a different model with `WHATSMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
 
 ## Privacy and security notes
 
@@ -194,17 +194,17 @@ Point at a different model with `WAMARCHY_WHISPER_MODEL=/path/to/ggml-*.bin`.
   wacli's own store before any file is handed to a player or viewer;
   WhatsApp-supplied filenames are never used to build a path.
 - Downloaded media is cached `0600` under
-  `~/.cache/omarchy-wamarchy/media/`. Delete that directory to clear it.
+  `~/.cache/omarchy-whatsmarchy/media/`. Delete that directory to clear it.
 - Nothing is installed, updated, or removed from your system without an
   explicit typed confirmation in a terminal.
 
 ## Uninstall
 
 ```bash
-omarchy plugin remove io.github.boyoyooo.wamarchy
-rm -rf ~/.config/omarchy/wamarchy ~/.cache/omarchy-wamarchy
-systemctl --user disable --now wamarchy-sync
-rm -f ~/.config/systemd/user/wamarchy-sync.service
+omarchy plugin remove io.github.boyoyooo.whatsmarchy
+rm -rf ~/.config/omarchy/whatsmarchy ~/.cache/omarchy-whatsmarchy
+systemctl --user disable --now whatsmarchy-sync
+rm -f ~/.config/systemd/user/whatsmarchy-sync.service
 ```
 
 Removing the plugin does not unlink your WhatsApp device. To do that, run
@@ -214,10 +214,10 @@ Removing the plugin does not unlink your WhatsApp device. To do that, run
 
 ```bash
 # What does the poller actually see?
-~/.config/omarchy/plugins/io.github.boyoyooo.wamarchy/bin/wa-status.sh | jq
+~/.config/omarchy/plugins/io.github.boyoyooo.whatsmarchy/bin/wa-status.sh | jq
 
 # Is the mirror being fed?
-systemctl --user status wamarchy-sync
+systemctl --user status whatsmarchy-sync
 wacli doctor
 
 # QML / widget errors

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the Wamarchy poller and action scripts.
+# Shared helpers for the Whatsmarchy poller and action scripts.
 #
 # Sourced, never executed. Every function here is expected to be usable from a
 # script running under `set -uo pipefail` with `umask 077`.
@@ -58,7 +58,7 @@ resolve_store_dir() {
 #     "seenAll": <unix seconds> }
 
 config_path() {
-  printf '%s' "${WAMARCHY_CONFIG:-$HOME/.config/omarchy/wamarchy/config.json}"
+  printf '%s' "${WHATSMARCHY_CONFIG:-$HOME/.config/omarchy/whatsmarchy/config.json}"
 }
 
 config_defaults='{"mode":"all","allow":[],"seen":{},"seenAll":0}'
@@ -79,7 +79,7 @@ assert_config_safe() {
   # Refused explicitly rather than as a side effect of a symlink's 777 mode
   # happening to trip the check below: that only works because GNU stat does
   # not dereference by default, and a later switch to `stat -L` would silently
-  # reopen a symlink-swap on $WAMARCHY_CONFIG.
+  # reopen a symlink-swap on $WHATSMARCHY_CONFIG.
   [[ -L "$path" ]] && emit_error "config file is a symlink, refusing to use it: $path"
   st="$(stat -c '%a %U' -- "$path" 2>/dev/null)" || emit_error "cannot stat $path"
   mode="${st%% *}"

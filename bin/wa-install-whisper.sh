@@ -8,7 +8,7 @@
 # Nothing here is ever invoked by the poller or by any timer.
 set -uo pipefail
 
-MODEL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/wamarchy/models"
+MODEL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whatsmarchy/models"
 MODEL_NAME="ggml-base.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${MODEL_NAME}"
 
@@ -22,7 +22,7 @@ confirm() {
   [[ "$answer" == "yes" ]]
 }
 
-bold "Wamarchy — optional local voice-note transcription"
+bold "Whatsmarchy — optional local voice-note transcription"
 echo
 echo "Transcription is entirely optional. Voice notes already play without it."
 echo "Nothing below runs unless you type 'yes' at each prompt."
@@ -82,7 +82,7 @@ if confirm "Download the model now?"; then
   fi
   mv -f -- "$MODEL_DIR/$MODEL_NAME.part" "$MODEL_DIR/$MODEL_NAME"
   echo
-  bold "Done. Reopen the Wamarchy panel and the Transcribe button will be active."
+  bold "Done. Reopen the Whatsmarchy panel and the Transcribe button will be active."
 else
   echo "Skipped. No model was downloaded; transcription stays unavailable."
 fi

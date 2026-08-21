@@ -7,7 +7,7 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "io.github.boyoyooo.wamarchy"
+  moduleName: "io.github.boyoyooo.whatsmarchy"
   manageIpc: false
 
   property var anchorItem: null
@@ -496,7 +496,7 @@ Panel {
         Text {
           width: parent.width
           visible: root.everLoaded && root.errorText === "" && !root.syncRunning
-          text: "wacli sync is not running — this list is frozen. Start it with:  systemctl --user start wamarchy-sync"
+          text: "wacli sync is not running — this list is frozen. Start it with:  systemctl --user start whatsmarchy-sync"
           textFormat: Text.PlainText
           color: "#e0a458"
           wrapMode: Text.WordWrap

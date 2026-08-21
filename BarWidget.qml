@@ -5,7 +5,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "io.github.boyoyooo.wamarchy"
+  moduleName: "io.github.boyoyooo.whatsmarchy"
 
   // --- settings, read from this widget's shell.json entry -------------------
   readonly property int    interval:      Math.max(5, setting("interval", 20))
@@ -211,7 +211,7 @@ BarWidget {
           }
         }
       }
-      notifier.command = ["notify-send", "-a", "Wamarchy", "-u", "normal", "--", title, body]
+      notifier.command = ["notify-send", "-a", "Whatsmarchy", "-u", "normal", "--", title, body]
       notifier.running = true
     }
   }

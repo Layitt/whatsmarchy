@@ -1,5 +1,5 @@
 [Unit]
-Description=wacli WhatsApp sync (feeds the Wamarchy bar widget)
+Description=wacli WhatsApp sync (feeds the Whatsmarchy bar widget)
 Documentation=https://github.com/openclaw/wacli
 After=network-online.target
 Wants=network-online.target
@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Follow mode keeps the local SQLite mirror current. --download-media is left
-# off on purpose: Wamarchy fetches attachments on demand when you open a chat,
+# off on purpose: Whatsmarchy fetches attachments on demand when you open a chat,
 # so the whole media stream does not land on disk unasked.
 #
 # The storage caps are deliberate — WhatsApp history sync can grow wacli.db

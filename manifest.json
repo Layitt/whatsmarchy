@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.boyoyooo.wamarchy",
-  "name": "Wamarchy",
+  "id": "io.github.boyoyooo.whatsmarchy",
+  "name": "Whatsmarchy",
   "version": "0.1.0",
   "author": "boyoyooo",
   "license": "MIT",
@@ -9,7 +9,7 @@
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {
-    "displayName": "Wamarchy",
+    "displayName": "Whatsmarchy",
     "description": "WhatsApp unread senders and counts, with a preview panel and quick reply (requires wacli)",
     "category": "Communication",
     "allowMultiple": false,
