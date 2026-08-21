@@ -663,6 +663,13 @@ Panel {
                         root.openWebApp()
                       } else {
                         root.expandedJid = chatItem.modelData.jid
+                        // Land the cursor in the reply field on open: besides
+                        // saving a click before typing, this is what makes a
+                        // system-wide dictation hotkey (e.g. Omarchy's voxtype)
+                        // work here for free — it types into whatever field
+                        // currently has focus, so quick reply needs nothing
+                        // dictation-specific of its own.
+                        Qt.callLater(function() { replyText.forceActiveFocus() })
                         root.markSeen(chatItem.modelData.jid, chatItem.modelData.lastTs)
                         var msgs = chatItem.modelData.messages || []
                         for (var i = 0; i < msgs.length; i++) {
