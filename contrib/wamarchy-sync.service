@@ -1,0 +1,25 @@
+[Unit]
+Description=wacli WhatsApp sync (feeds the Wamarchy bar widget)
+Documentation=https://github.com/openclaw/wacli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Follow mode keeps the local SQLite mirror current. --download-media is left
+# off on purpose: Wamarchy fetches attachments on demand when you open a chat,
+# so the whole media stream does not land on disk unasked.
+#
+# The storage caps are deliberate — WhatsApp history sync can grow wacli.db
+# substantially, and wacli warns when neither cap is set. Raise them if you
+# want deeper history.
+#
+# --presence-mode quiet suppresses the available-presence signal WhatsApp uses
+# to decide a linked device is active, so your phone keeps notifying you
+# normally. Drop it if you would rather this machine count as the active device.
+ExecStart=/usr/bin/env wacli sync --follow --stale-threshold 2m --max-db-size 2GB --presence-mode quiet
+Restart=on-failure
+RestartSec=15s
+
+[Install]
+WantedBy=default.target

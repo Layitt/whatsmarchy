@@ -1,0 +1,6 @@
+# Nothing generated lives in this repo. Runtime state is deliberately kept
+# outside it: ~/.config/omarchy/wamarchy/ (settings) and
+# ~/.cache/omarchy-wamarchy/ (downloaded media).
+*.swp
+*~
+.DS_Store

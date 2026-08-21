@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.boyoyooo.wamarchy",
+  "name": "Wamarchy",
+  "version": "0.1.0",
+  "author": "boyoyooo",
+  "license": "MIT",
+  "description": "WhatsApp notifications in the Omarchy bar, powered by wacli. The bar shows who is waiting and how many messages — never the message text. Click for previews, image thumbnails, voice-note playback, optional local transcription, and a quick text reply.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Wamarchy",
+    "description": "WhatsApp unread senders and counts, with a preview panel and quick reply (requires wacli)",
+    "category": "Communication",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "interval": 20,
+      "label": "",
+      "barDetail": "Sender and count",
+      "previewLimit": 4,
+      "includeChannels": false,
+      "desktopNotifications": "Sender only",
+      "hideWhenEmpty": false
+    },
+    "schema": [
+      {
+        "key": "interval",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 20,
+        "description": "How often the local wacli database is checked for new messages. Nothing is fetched from WhatsApp — that is wacli sync's job."
+      },
+      {
+        "key": "label",
+        "type": "string",
+        "label": "Display label",
+        "defaultValue": "",
+        "description": "Optional text shown in the panel header, useful if you run more than one WhatsApp account."
+      },
+      {
+        "key": "barDetail",
+        "type": "enum",
+        "label": "What the bar shows",
+        "options": ["Icon only", "Count only", "Sender and count"],
+        "defaultValue": "Sender and count",
+        "description": "Message text is never shown in the bar, at any setting."
+      },
+      {
+        "key": "previewLimit",
+        "type": "integer",
+        "label": "Messages previewed per chat",
+        "min": 1,
+        "max": 20,
+        "step": 1,
+        "defaultValue": 4
+      },
+      {
+        "key": "includeChannels",
+        "type": "boolean",
+        "label": "Include WhatsApp Channels",
+        "defaultValue": false,
+        "description": "Off by default: channels are usually broadcast noise rather than messages addressed to you."
+      },
+      {
+        "key": "desktopNotifications",
+        "type": "enum",
+        "label": "Desktop notifications",
+        "options": ["Off", "Sender only", "Sender and preview"],
+        "defaultValue": "Sender only",
+        "description": "\"Sender and preview\" puts message text on screen, which anyone nearby can read."
+      },
+      {
+        "key": "hideWhenEmpty",
+        "type": "boolean",
+        "label": "Hide the widget when there is nothing new",
+        "defaultValue": false
+      }
+    ]
+  }
+}
