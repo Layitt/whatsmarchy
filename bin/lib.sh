@@ -118,14 +118,31 @@ read_config() {
   # that has grown past CONFIG_MAX_BYTES (corrupt, or something other than
   # this plugin writing to it) is treated the same as an unreadable one — its
   # size alone is reason enough not to load it whole into this shell.
-  local path raw size
+  #
+  # The size check and the actual read happen through the *same* open file
+  # description, inside one `timeout`-bounded subprocess, rather than as a
+  # separate `stat` on the path followed by a separate `cat` of the path: two
+  # path lookups is two chances for a same-user swap in between them to hand
+  # the second one something the first one never saw — a bigger file, or a
+  # FIFO/device that `cat` would then block on indefinitely. Opening once and
+  # reading a capped number of bytes off that descriptor closes both gaps:
+  # whatever gets opened is what gets read, `[[ -f /dev/fd/$fd ]]` refuses
+  # anything that isn't a plain file once it's open, and `timeout` bounds the
+  # open() call itself (a FIFO with no writer blocks *there*, before any byte
+  # cap on the read would even apply).
+  local path raw
   path="$(config_path)"
   raw=""
   if [[ -r "$path" ]]; then
-    size="$(stat -c '%s' -- "$path" 2>/dev/null)"
-    if is_uint "${size:-}" && (( size <= CONFIG_MAX_BYTES )); then
-      raw="$(cat -- "$path" 2>/dev/null)"
-    fi
+    raw="$(timeout 2s bash -c '
+      exec {fd}<"$1" 2>/dev/null || exit 1
+      [[ -f "/dev/fd/$fd" ]] || exit 1
+      head -c "$2" <&"$fd"
+    ' _ "$path" "$((CONFIG_MAX_BYTES + 1))" 2>/dev/null)"
+    # Getting back more than CONFIG_MAX_BYTES means the real file is larger
+    # than the cap (head stopped exactly at the +1 ceiling) — reject rather
+    # than silently use a truncated, likely-invalid-JSON prefix.
+    (( ${#raw} > CONFIG_MAX_BYTES )) && raw=""
   fi
   printf '%s' "${raw:-$config_defaults}" | jq -c --argjson d "$config_defaults" '
     (if type == "object" then . else {} end) as $c
