@@ -79,71 +79,169 @@ SQL_PATH_MAX=512           # per-field cap for filenames/paths/mime strings
 SQL_OUTPUT_MAX=4194304     # 4 MiB cap on total sqlite3 stdout, belt-and-braces on top
                            # of the per-field caps above and each query's row LIMIT
 
-# Must be called once from the *main shell* of each entry point, before any
-# read_config. This file decides which chats may notify and which JIDs later
-# reach a `wacli` argument list, so a file owned by someone else — or writable
-# by group/other — is refused rather than used.
+# --- trusted read of the config file ----------------------------------------
+# This file decides which chats may notify and which JIDs later reach a `wacli`
+# argument list, so "is this really our config?" has to be answered about the
+# *bytes we are about to parse*, not about a path we looked at beforehand.
 #
-# Deliberately not folded into read_config: that runs inside a command
-# substitution, where an emit_error would only kill the subshell and its
-# `{"ok":false}` JSON would be captured as if it were the config. A refusal has
-# to reach stdout as the script's whole answer.
-assert_config_safe() {
-  local path st mode owner
+# Every path-based answer is a guess with an expiry date. `[[ -L $path ]]`,
+# `stat -c '%a %U' $path`, even `[[ -f /dev/fd/$fd ]]` after a plain
+# `exec {fd}<$path` — each of those resolves the path a second time, or
+# describes only where the resolution *landed*. In a same-user threat model
+# (another process running as this user: a compromised app, a careless script,
+# anything that shares the session bus) the path can be replaced between any
+# two of those steps. A plain open() also follows a trailing symlink, so a
+# replacement symlink can quietly substitute a different regular file — one
+# that passes every "is it a regular file, owned by you, mode 600" test,
+# because it genuinely is all three; it simply isn't *this plugin's* config.
+#
+# So the whole decision is taken on one file descriptor:
+#
+#   O_NOFOLLOW  — the kernel refuses the open with ELOOP if the final path
+#                 component is a symlink. Not an lstat() beforehand (that is
+#                 the same two-lookup race in a different costume): the flag
+#                 is part of the open() the file is actually read from.
+#   O_NONBLOCK  — a FIFO or a device left at that path opens instead of
+#                 parking this process in the kernel forever, so the type
+#                 check below gets to run and reject it.
+#   fstat(fd)   — owner, mode, size and type of the object behind *this*
+#                 descriptor. Nothing is re-resolved, so there is no window
+#                 left between the check and the read.
+#   read(fd)    — the same descriptor, bounded by CONFIG_MAX_BYTES.
+#
+# Bash cannot pass open flags on a redirection, hence the interpreter. python3
+# is used when present and perl otherwise (Arch ships perl in `base`); the two
+# implementations enforce byte-for-byte the same rules, and either one is
+# still wrapped in `timeout` as a backstop.
+#
+# Exit status: 0 = trustworthy bytes on stdout; 3 = no config file at all (a
+# fresh install, not a fault); anything else = refused, with a one-line human
+# reason on stderr and nothing on stdout.
+config_slurp() {
+  local path
   path="$(config_path)"
+  if command -v python3 >/dev/null 2>&1; then
+    timeout 2s python3 -c '
+import errno, os, stat, sys
+path, cap = sys.argv[1], int(sys.argv[2])
+def refuse(msg):
+    sys.stderr.write(msg + "\n")
+    raise SystemExit(1)
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError as e:
+    if e.errno == errno.ENOENT:
+        raise SystemExit(3)
+    if e.errno == errno.ELOOP:
+        refuse("it is a symlink")
+    refuse("cannot open it (" + errno.errorcode.get(e.errno, str(e.errno)) + ")")
+buf = b""
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        refuse("it is not a regular file")
+    if st.st_uid != os.getuid():
+        refuse("it is owned by uid " + str(st.st_uid) + ", not by you")
+    if st.st_mode & 0o077:
+        refuse("it is readable or writable by group/others - chmod 600 it")
+    if st.st_size > cap:
+        refuse("it is larger than " + str(cap) + " bytes")
+    # One byte past the cap is enough to tell "exactly at the ceiling" from
+    # "grew while we were reading it"; a truncated prefix is never used.
+    while len(buf) <= cap:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        buf += chunk
+finally:
+    os.close(fd)
+if len(buf) > cap:
+    refuse("it is larger than " + str(cap) + " bytes")
+sys.stdout.buffer.write(buf)
+' "$path" "$CONFIG_MAX_BYTES"
+  elif command -v perl >/dev/null 2>&1; then
+    timeout 2s perl -e '
+use strict; use warnings; use Errno;
+use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK);
+sub refuse { print STDERR $_[0], "\n"; exit 1 }
+my ($path, $cap) = @ARGV;
+my $fh;
+unless (sysopen($fh, $path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) {
+  exit 3 if $!{ENOENT};
+  refuse("it is a symlink") if $!{ELOOP};
+  refuse("cannot open it ($!)");
+}
+my @st = stat($fh) or refuse("cannot fstat it");
+refuse("it is not a regular file") unless ($st[2] & 0170000) == 0100000;
+refuse("it is owned by uid $st[4], not by you") if $st[4] != $<;
+refuse("it is readable or writable by group/others - chmod 600 it") if $st[2] & 0077;
+refuse("it is larger than $cap bytes") if $st[7] > $cap;
+my $buf = "";
+while (length($buf) <= $cap) {
+  my $n = sysread($fh, $buf, 65536, length($buf));
+  refuse("read failed ($!)") unless defined $n;
+  last if $n == 0;
+}
+refuse("it is larger than $cap bytes") if length($buf) > $cap;
+binmode(STDOUT);
+print STDOUT $buf;
+' -- "$path" "$CONFIG_MAX_BYTES"
+  else
+    printf 'no python3 or perl available to open it without following symlinks\n' >&2
+    return 1
+  fi
+}
+
+# Called once from the *main shell* of each entry point, before any read_config.
+#
+# This is the friendly half of the check, not the authoritative one: it runs
+# the exact same fd-based verification as read_config (same function, same
+# rules) purely so that a persistently wrong config — a symlink someone left
+# behind, a file restored from a backup as root, a stray `chmod 644` — is
+# reported as `{"ok":false,"error":"…"}` the user can act on, instead of the
+# widget silently falling back to defaults and notifying for every chat.
+#
+# It cannot be what makes the read safe: it is a separate invocation, and
+# anything it observed could be replaced before read_config runs. What makes
+# the read safe is that read_config re-verifies through the descriptor it
+# reads from. Deliberately not folded into read_config either — that runs
+# inside a command substitution, where an emit_error would only kill the
+# subshell and its `{"ok":false}` JSON would be captured as if it were the
+# config. A refusal has to reach stdout as the script's whole answer.
+assert_config_safe() {
+  local path reason rc
+  path="$(config_path)"
+  # Purely to keep a fresh install quiet. Not a security check (nothing is
+  # decided from it), so its own raciness costs nothing: config_slurp reports
+  # an absent file the same way, and read_config re-checks regardless.
   [[ -e "$path" || -L "$path" ]] || return 0
-  # Refused explicitly rather than as a side effect of a symlink's 777 mode
-  # happening to trip the check below: that only works because GNU stat does
-  # not dereference by default, and a later switch to `stat -L` would silently
-  # reopen a symlink-swap on $WHATSMARCHY_CONFIG.
-  [[ -L "$path" ]] && emit_error "config file is a symlink, refusing to use it: $path"
-  st="$(stat -c '%a %U' -- "$path" 2>/dev/null)" || emit_error "cannot stat $path"
-  mode="${st%% *}"
-  owner="${st#* }"
-  # An unparseable mode must not sail through: `(( 8#$mode & ... ))` on garbage
-  # raises an arithmetic error, and `((` reports that as *false*, which would
-  # read as "permissions are fine".
-  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || emit_error "cannot read permissions of $path"
-  [[ "$owner" == "$(id -un)" ]] \
-    || emit_error "config file is not owned by you: $path"
-  (( 8#$mode & 8#022 )) \
-    && emit_error "config file is writable by group/others — chmod 600 it: $path"
-  return 0
+  # stderr carries the reason, stdout (the file's contents) is discarded — this
+  # call exists only for its verdict.
+  reason="$(config_slurp 2>&1 >/dev/null)"
+  rc=$?
+  case "$rc" in
+    0 | 3) return 0 ;;
+    124)   emit_error "config file could not be read within 2s: $path" ;;
+    *)     emit_error "refusing to use the config file — ${reason:-unreadable}: $path" ;;
+  esac
 }
 
 read_config() {
   # Always prints a complete, well-typed config object: a hand-edited file
   # with a missing key or a wrong type must degrade to the default for that
   # key rather than propagate `null` into the widget's counting logic. A file
-  # that has grown past CONFIG_MAX_BYTES (corrupt, or something other than
-  # this plugin writing to it) is treated the same as an unreadable one — its
-  # size alone is reason enough not to load it whole into this shell.
+  # this plugin cannot vouch for — absent, oversized, wrong owner, wrong mode,
+  # a symlink, a FIFO — is treated exactly like an unreadable one and the
+  # defaults are used, because a caller inside a command substitution has no
+  # way to raise an error (see assert_config_safe above, which is what makes
+  # the ordinary cases loud).
   #
-  # The size check and the actual read happen through the *same* open file
-  # description, inside one `timeout`-bounded subprocess, rather than as a
-  # separate `stat` on the path followed by a separate `cat` of the path: two
-  # path lookups is two chances for a same-user swap in between them to hand
-  # the second one something the first one never saw — a bigger file, or a
-  # FIFO/device that `cat` would then block on indefinitely. Opening once and
-  # reading a capped number of bytes off that descriptor closes both gaps:
-  # whatever gets opened is what gets read, `[[ -f /dev/fd/$fd ]]` refuses
-  # anything that isn't a plain file once it's open, and `timeout` bounds the
-  # open() call itself (a FIFO with no writer blocks *there*, before any byte
-  # cap on the read would even apply).
-  local path raw
-  path="$(config_path)"
-  raw=""
-  if [[ -r "$path" ]]; then
-    raw="$(timeout 2s bash -c '
-      exec {fd}<"$1" 2>/dev/null || exit 1
-      [[ -f "/dev/fd/$fd" ]] || exit 1
-      head -c "$2" <&"$fd"
-    ' _ "$path" "$((CONFIG_MAX_BYTES + 1))" 2>/dev/null)"
-    # Getting back more than CONFIG_MAX_BYTES means the real file is larger
-    # than the cap (head stopped exactly at the +1 ceiling) — reject rather
-    # than silently use a truncated, likely-invalid-JSON prefix.
-    (( ${#raw} > CONFIG_MAX_BYTES )) && raw=""
-  fi
+  # config_slurp is the single place the trust decision is made, and it makes
+  # it on the descriptor it reads from: O_NOFOLLOW + fstat, no second path
+  # lookup anywhere in between. See its header for why nothing path-based is
+  # sufficient here.
+  local raw
+  raw="$(config_slurp 2>/dev/null)" || raw=""
   printf '%s' "${raw:-$config_defaults}" | jq -c --argjson d "$config_defaults" '
     (if type == "object" then . else {} end) as $c
     | {
@@ -160,9 +258,21 @@ write_config() {
   # Atomic replace via a same-directory temp file, so a crash mid-write can
   # never leave a half-written config that read_config would silently reset
   # (which would drop the whole allow-list and start notifying for everyone).
+  # The `mv` at the end is a rename(2), which replaces a symlink sitting at the
+  # destination instead of writing through it — so a swapped config path can
+  # never redirect this write into some other file the user owns.
   local path dir tmp payload="$1"
   path="$(config_path)"
   dir="$(dirname -- "$path")"
+  # `mkdir -p` is perfectly happy with a symlink to a directory, and the chmod
+  # right below — plus every config written afterwards — would then land on its
+  # target. Same refusal ensure_voice_dir makes in wa-ctl.sh, for the same
+  # reason. This one is defence in depth rather than a guarantee: like any
+  # path-based test it can be raced, and the directory components above the
+  # file cannot be pinned from a shell at all. What actually protects the read
+  # side is that read_config re-verifies owner and mode on the descriptor it
+  # reads from, wherever that descriptor ended up coming from.
+  [[ -L "$dir" ]] && return 1
   mkdir -p -- "$dir" 2>/dev/null || return 1
   chmod 700 -- "$dir" 2>/dev/null
   printf '%s' "$payload" | jq -e . >/dev/null 2>&1 || return 1

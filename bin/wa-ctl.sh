@@ -486,6 +486,18 @@ cmd_voice_play() {
   path="$VOICE_DIR/rec-$tok.ogg"
   # -L as well as -f: VOICE_DIR is the user's own, but a symlink dropped in it
   # would otherwise turn Play into "open whatever this points at".
+  #
+  # Unlike the config read (lib.sh, which decides on the descriptor it reads
+  # from) and unlike voice-send below (which renames the file out from under
+  # its predictable name before handing it to wacli), this check still
+  # describes the path rather than the file the player will open: the path is
+  # looked up a second time by mpv itself, and a same-user process could swap
+  # it in that gap. Left as it is deliberately — the whole outcome of winning
+  # that race is that a file the user already owns gets played through their
+  # own speakers, in a 0700 directory, by a player invoked with --no-config
+  # and --load-unsafe-playlists=no. Nothing leaves the machine and nothing is
+  # written; the two paths where the stake is higher — the authorization
+  # config, and sending a file to a contact — are closed properly.
   [[ -f "$path" && ! -L "$path" && -s "$path" ]] || emit_error "that recording is no longer available"
   spawn_player "$path"
   emit_ok --arg token "$tok"
