@@ -63,6 +63,22 @@ config_path() {
 
 config_defaults='{"mode":"all","allow":[],"seen":{},"seenAll":0}'
 
+# --- size caps ----------------------------------------------------------
+# Everything below ultimately comes from either a hand-editable config file
+# or WhatsApp-controlled data (message text, contact/business names,
+# filenames) relayed through wacli's SQLite mirror. None of those sources is
+# bounded by anything on this machine — a corrupted config or a single
+# oversized field from a chat could otherwise be loaded whole into a bash
+# command substitution (which has no size limit of its own) and exhaust the
+# poller or wedge the long-lived shell. These are generous ceilings for any
+# real preview/list use, not a tuned "legitimate maximum".
+CONFIG_MAX_BYTES=262144    # 256 KiB cap on how much of config.json is ever read
+SQL_FIELD_MAX=4000         # per-field cap for message/body text pulled from SQLite
+SQL_NAME_MAX=256           # per-field cap for names/labels (sender, chat, contact)
+SQL_PATH_MAX=512           # per-field cap for filenames/paths/mime strings
+SQL_OUTPUT_MAX=4194304     # 4 MiB cap on total sqlite3 stdout, belt-and-braces on top
+                           # of the per-field caps above and each query's row LIMIT
+
 # Must be called once from the *main shell* of each entry point, before any
 # read_config. This file decides which chats may notify and which JIDs later
 # reach a `wacli` argument list, so a file owned by someone else — or writable
@@ -98,12 +114,18 @@ assert_config_safe() {
 read_config() {
   # Always prints a complete, well-typed config object: a hand-edited file
   # with a missing key or a wrong type must degrade to the default for that
-  # key rather than propagate `null` into the widget's counting logic.
-  local path raw
+  # key rather than propagate `null` into the widget's counting logic. A file
+  # that has grown past CONFIG_MAX_BYTES (corrupt, or something other than
+  # this plugin writing to it) is treated the same as an unreadable one — its
+  # size alone is reason enough not to load it whole into this shell.
+  local path raw size
   path="$(config_path)"
   raw=""
   if [[ -r "$path" ]]; then
-    raw="$(cat -- "$path" 2>/dev/null)"
+    size="$(stat -c '%s' -- "$path" 2>/dev/null)"
+    if is_uint "${size:-}" && (( size <= CONFIG_MAX_BYTES )); then
+      raw="$(cat -- "$path" 2>/dev/null)"
+    fi
   fi
   printf '%s' "${raw:-$config_defaults}" | jq -c --argjson d "$config_defaults" '
     (if type == "object" then . else {} end) as $c

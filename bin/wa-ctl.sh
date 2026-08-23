@@ -105,7 +105,10 @@ cmd_recipients() {
   # one contact overrun another's row. The shared component is not this plugin's
   # to depend on, so the markup characters are stripped here at the source, the
   # same way BarWidget does for the bar label.
-  rows="$( sqlite3 -readonly -noheader -batch -- "$db" <<'SQL' 2>&1
+  # SQL_NAME_MAX (from lib.sh) is a fixed integer constant, not caller-controlled
+  # data, so interpolating it here doesn't reopen the injection risk this heredoc
+  # otherwise avoids by keeping every WhatsApp-controlled value out of the SQL text.
+  rows="$( { sqlite3 -readonly -noheader -batch -- "$db" <<SQL 2>&1
     SELECT COALESCE(json_group_array(json_object(
       'value', jid, 'label',
         replace(replace(replace(label, '<', ' '), '>', ' '), '&', ' '),
@@ -114,14 +117,14 @@ cmd_recipients() {
     FROM (
       SELECT
         c.jid AS jid,
-        COALESCE(NULLIF(c.name,''), NULLIF(g.name,''), NULLIF(ct.push_name,''),
+        substr(COALESCE(NULLIF(c.name,''), NULLIF(g.name,''), NULLIF(ct.push_name,''),
                  NULLIF(ct.full_name,''), NULLIF(ct.business_name,''),
-                 NULLIF(ct.phone,''), c.jid) AS label,
+                 NULLIF(ct.phone,''), c.jid), 1, $SQL_NAME_MAX) AS label,
         CASE c.kind
           WHEN 'group'      THEN 'Group'
           WHEN 'dm'         THEN 'Direct message'
           WHEN 'newsletter' THEN 'Channel'
-          ELSE COALESCE(c.kind,'Chat')
+          ELSE substr(COALESCE(c.kind,'Chat'), 1, $SQL_NAME_MAX)
         END AS descr
       FROM chats c
       LEFT JOIN groups   g  ON g.jid  = c.jid
@@ -132,7 +135,7 @@ cmd_recipients() {
       LIMIT 500
     );
 SQL
-  )" || emit_error "sqlite read failed: $rows"
+  } | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
 
   printf '%s' "$rows" | jq -e 'type == "array"' >/dev/null 2>&1 \
     || emit_error "unexpected recipient query result"

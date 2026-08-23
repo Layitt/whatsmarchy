@@ -119,13 +119,13 @@ FROM (
     m.chat_jid AS chat_jid,
     m.msg_id   AS msg_id,
     m.ts       AS ts,
-    COALESCE(NULLIF(m.sender_name,''), NULLIF(ct.push_name,''), NULLIF(ct.full_name,''),
-             NULLIF(ct.first_name,''), '')                                      AS sender,
-    COALESCE(NULLIF(m.text,''), NULLIF(m.media_caption,''), NULLIF(m.display_text,''), '') AS body,
-    COALESCE(m.media_type,'') AS mtype,
-    COALESCE(m.mime_type,'')  AS mime,
-    COALESCE(m.filename,'')   AS fname,
-    COALESCE(m.local_path,'') AS lpath,
+    substr(COALESCE(NULLIF(m.sender_name,''), NULLIF(ct.push_name,''), NULLIF(ct.full_name,''),
+             NULLIF(ct.first_name,''), ''), 1, $SQL_NAME_MAX)                    AS sender,
+    substr(COALESCE(NULLIF(m.text,''), NULLIF(m.media_caption,''), NULLIF(m.display_text,''), ''), 1, $SQL_FIELD_MAX) AS body,
+    substr(COALESCE(m.media_type,''), 1, $SQL_NAME_MAX) AS mtype,
+    substr(COALESCE(m.mime_type,''),  1, $SQL_NAME_MAX) AS mime,
+    substr(COALESCE(m.filename,''),   1, $SQL_PATH_MAX) AS fname,
+    substr(COALESCE(m.local_path,''), 1, $SQL_PATH_MAX) AS lpath,
     -- chats.name has proven unreliable for groups — seen holding the chat's
     -- own bare JID (right after a fresh pairing) and, separately, a message
     -- sender's push_name (wacli apparently misattributing it at write time)
@@ -133,8 +133,8 @@ FROM (
     -- time it has been checked, so for a group it is checked first, ahead of
     -- chats.name rather than only as a fallback; chats.name still leads for
     -- a DM, where there is no groups-table entry to prefer over it.
-    COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), m.chat_jid), NULLIF(cc.push_name,''),
-             NULLIF(cc.full_name,''), NULLIF(cc.business_name,''), m.chat_jid)  AS chat_name,
+    substr(COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), m.chat_jid), NULLIF(cc.push_name,''),
+             NULLIF(cc.full_name,''), NULLIF(cc.business_name,''), m.chat_jid), 1, $SQL_NAME_MAX) AS chat_name,
     c.kind AS kind,
     c.unread AS chat_unread
   FROM messages m
@@ -168,7 +168,14 @@ FROM (
 # refresh() no-ops while a poll is in flight (one at a time), so a single
 # stuck sqlite3 call would permanently wedge every future poll, including a
 # manual click on the refresh button, until the shell itself was reloaded.
-rows="$(printf '%s' "$SQL" | timeout 8s sqlite3 -readonly -noheader -batch -- "$DB" 2>&1)"
+# The per-field substr() caps above bound each row; this head -c is
+# belt-and-braces on the total, in case SCAN_LIMIT rows of near-max-size
+# fields ever add up to more than this shell should hold at once — `rows`
+# lands in this same command substitution either way, so the cap has to sit
+# on the read, not on what's done with it afterwards. pipefail (set at the
+# top of this script) still surfaces a real sqlite3/timeout failure through
+# `head`, which itself always exits 0.
+rows="$(printf '%s' "$SQL" | timeout 8s sqlite3 -readonly -noheader -batch -- "$DB" 2>&1 | head -c "$SQL_OUTPUT_MAX")"
 sqlite_status=$?
 if (( sqlite_status != 0 )); then
   emit_error "sqlite read failed: ${rows:-unknown error}"
