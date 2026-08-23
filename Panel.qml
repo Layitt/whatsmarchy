@@ -39,19 +39,43 @@ Panel {
   readonly property string iconSettings: "\u{F0493}"
   readonly property string iconMarkRead: "\u{F012C}"
   readonly property string iconRefresh:  "\u{F0450}"
+  readonly property string iconWhatsApp: "\u{F05A3}"
 
   // --- panel-local UI state -------------------------------------------------
   property string expandedJid: ""
+  // markSeen() refreshes the poller immediately, and the poller only returns
+  // chats with unread messages — so the chat the user just opened vanishes
+  // from hostWidget.chats within the same second, closing the view before it
+  // can be read. This snapshot keeps it rendered until the user collapses it
+  // or the panel closes, regardless of what the live poll says.
+  property var    expandedSnapshot: null
+  readonly property var displayChats: {
+    if (root.expandedJid === "") return root.chats
+    for (var i = 0; i < root.chats.length; i++) {
+      if (root.chats[i].jid === root.expandedJid) return root.chats
+    }
+    if (root.expandedSnapshot && root.expandedSnapshot.jid === root.expandedJid)
+      return root.chats.concat([root.expandedSnapshot])
+    return root.chats
+  }
   property bool   settingsOpen: false
   property string actionError: ""
   // Keyed by "<jid>|<msgId>" so an id colliding across chats can't cross wires.
   property var    mediaPaths: ({})
-  property var    transcripts: ({})
   property string busyKey: ""
   property var    allowList: []
-  property bool   whisperAvailable: false
-  property string whisperDetail: ""
-  property bool   confirmInstallOpen: false
+  // Marking read for real (see mark_read_remote in wa-ctl.sh) briefly stops
+  // and restarts the sync service — a few seconds, not instant. This gates
+  // an overlay so a click elsewhere mid-flight can't race it.
+  //
+  // A counter, not a bool: three independent processes can each be marking
+  // something read at once (per-row click, "mark all", auto-mark after a
+  // reply). Two overlapping, with one flipping a shared bool to false while
+  // the other is still running, left the overlay stuck forever whenever
+  // that happened — the bool never went back to true because nothing
+  // "started" it a second time from the other's perspective either.
+  property int    markReadPending: 0
+  readonly property bool markReadBusy: root.markReadPending > 0
 
   // --- voice reply state ----------------------------------------------------
   // Panel-scoped rather than per-delegate: there is one microphone, so there is
@@ -108,15 +132,14 @@ Panel {
     if (root.opened) {
       root.actionError = ""
       configProc.reload()
-      whisperProc.probe()
       voiceStatusProc.probe()
     } else {
       // Before anything else: a panel the user has dismissed must not leave a
       // microphone running behind it.
       root.cancelVoice()
       root.expandedJid = ""
+      root.expandedSnapshot = null
       root.settingsOpen = false
-      root.confirmInstallOpen = false
     }
   }
 
@@ -176,17 +199,23 @@ Panel {
   // --- action plumbing ------------------------------------------------------
   // Every mutating call goes through wa-ctl.sh, which validates its own
   // arguments; the panel never builds a wacli command line itself.
+  // Returns whether the action actually started. A caller that incremented
+  // some counter (or set some "in flight" state) before calling this must
+  // check the return value and undo that increment when it is false — the
+  // callback is the only place such state normally gets released, and it
+  // never fires for a request this guard rejects.
   function runAction(args, onDone) {
     if (actionProc.running) {
       // One action at a time. Silently swallowing the click would look like the
       // button is broken, which is worse than saying why nothing happened.
       root.actionError = "Still working on the previous action…"
-      return
+      return false
     }
     root.actionError = ""
     actionProc.pending = onDone || null
     actionProc.command = [root.ctlScript].concat(args)
     actionProc.running = true
+    return true
   }
 
   Process {
@@ -199,10 +228,14 @@ Panel {
         actionProc.pending = null
         var payload = null
         try { payload = JSON.parse(this.text) } catch (e) { payload = null }
+        // The callback now always fires, success or failure — it is the only
+        // hook some callers have to release state they set up before calling
+        // runAction (markSeen's markReadPending, playVoice/openAttachment's
+        // busyKey). A callback that only cares about success checks
+        // payload.ok itself; none of the current ones need to.
         if (!payload || payload.ok !== true) {
           root.actionError = String((payload && payload.error) || "action failed")
           root.busyKey = ""
-          return
         }
         if (cb) cb(payload)
       }
@@ -220,25 +253,6 @@ Panel {
           var p = JSON.parse(this.text)
           if (p && p.ok === true && Array.isArray(p.allow)) root.allowList = p.allow
         } catch (e) { /* leave the previous list rather than blanking it */ }
-      }
-    }
-  }
-
-  Process {
-    id: whisperProc
-    running: false
-    function probe() { if (!whisperProc.running) whisperProc.running = true }
-    command: [root.ctlScript, "whisper-status"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        try {
-          var p = JSON.parse(this.text)
-          root.whisperAvailable = !!(p && p.ok === true && p.available === true)
-          root.whisperDetail = String((p && (p.detail || p.tool)) || "")
-        } catch (e) {
-          root.whisperAvailable = false
-          root.whisperDetail = ""
-        }
       }
     }
   }
@@ -274,6 +288,10 @@ Panel {
         }
         root.actionError = ""
         root.replySent(sendProc.jid)
+        // Replying is a deliberate, completed action — unlike just opening a
+        // chat, there is no draft left to lose, so auto-marking it read here
+        // doesn't reintroduce the problem expandedSnapshot exists to avoid.
+        root.autoMarkSeenAfterSend(sendProc.jid)
       }
     }
   }
@@ -315,17 +333,110 @@ Panel {
     })
   }
 
-  function markSeen(jid, ts) {
-    runAction(["mark-seen", String(jid), String(Math.round(ts))], function () {
-      if (root.hostWidget) root.hostWidget.refresh()
-    })
+  // "How much the bar shows" is an Omarchy-native per-widget setting
+  // (shell.json), not something wa-ctl.sh's own config touches — set through
+  // the same CLI a user would otherwise have to type themselves.
+  function setBarDetail(value) {
+    if (barDetailProc.running) return
+    barDetailProc.command = ["omarchy", "bar", "set", root.moduleName, "barDetail", value]
+    barDetailProc.running = true
   }
 
-  function markAllSeen() {
-    runAction(["mark-all-seen", String(Math.round(Date.now() / 1000))], function () {
-      root.expandedJid = ""
+  Process {
+    id: barDetailProc
+    running: false
+  }
+
+  // onComplete (optional) fires after this call's own cleanup, success or
+  // failure either way — markAllSeen chains through it to run one mark-seen
+  // at a time rather than trying to batch them.
+  function markSeen(jid, ts, onComplete) {
+    root.markReadPending++
+    var started = runAction(["mark-seen", String(jid), String(Math.round(ts))], function () {
+      root.markReadPending--
+      // A deliberate "mark as read" must remove the chat even if it was the
+      // expanded one — expandedSnapshot exists to survive an *involuntary*
+      // drop (a slip while composing), not to override an explicit dismissal.
+      if (jid === root.expandedJid) {
+        root.expandedJid = ""
+        root.expandedSnapshot = null
+      }
       if (root.hostWidget) root.hostWidget.refresh()
+      if (onComplete) onComplete()
     })
+    // runAction's "one action at a time" guard rejected this one — its
+    // callback (the only place the increment above would be undone) will
+    // never fire, so undo it here instead of leaving the overlay stuck up.
+    if (!started) {
+      root.markReadPending--
+      if (onComplete) onComplete()
+    }
+  }
+
+  // Separate from markSeen()/actionProc on purpose: a reply send completing
+  // and a manual per-row click can land at the same moment, and routing both
+  // through the shared "one action at a time" actionProc meant the second
+  // one's request was silently dropped by that guard — including its
+  // callback, which was the only thing that would have decremented
+  // markReadPending again. The overlay then never went away.
+  function autoMarkSeenAfterSend(jid) {
+    // If a previous auto-mark is still in flight, autoMarkProc.running = true
+    // below would be a no-op — the process wouldn't actually restart for this
+    // jid, but nothing would ever decrement the increment this call is about
+    // to make. Skipping it here (rather than incrementing and relying on a
+    // decrement that will never come) is what keeps the counter honest.
+    if (autoMarkProc.running) return
+    root.markReadPending++
+    // Not Date.now(): that would also mark read (and send a real WhatsApp
+    // read receipt for) any message that arrived after the chat was opened
+    // but before Send was pressed — content the user never actually saw.
+    // expandedSnapshot.lastTs is the newest message that was on screen when
+    // this chat was opened, which is what "I replied, so I've seen this far"
+    // actually means. Falls back to now only if that snapshot is missing.
+    var ts = (root.expandedSnapshot && root.expandedSnapshot.jid === jid)
+      ? root.expandedSnapshot.lastTs : Date.now() / 1000
+    if (jid === root.expandedJid) {
+      root.expandedJid = ""
+      root.expandedSnapshot = null
+    }
+    autoMarkProc.command = [root.ctlScript, "mark-seen", String(jid), String(Math.round(ts))]
+    autoMarkProc.running = true
+  }
+
+  Process {
+    id: autoMarkProc
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.markReadPending--
+        if (root.hostWidget) root.hostWidget.refresh()
+      }
+    }
+  }
+
+  // "Mark everything as read" batching this into one script call (a JID list
+  // over stdin, piped through a shell function) was observed to hang
+  // indefinitely in live use — two extra forked processes (cat, and a
+  // subshell for the function) both depending on the same stdin EOF
+  // propagating through, which sometimes just didn't happen. Chaining plain
+  // markSeen() calls one at a time — the exact path a manual per-row click
+  // already takes, proven reliable — trades batching for something that
+  // actually finishes. Each step still does its own stop/start of the sync
+  // service, so this runs one full cycle per chat, not in parallel.
+  property var markAllQueue: []
+
+  function markAllSeen() {
+    if (root.markAllQueue.length > 0) return
+    root.markAllQueue = root.chats.map(function (c) {
+      return { jid: String(c.jid), ts: c.lastTs }
+    })
+    root._markAllStep()
+  }
+
+  function _markAllStep() {
+    if (root.markAllQueue.length === 0) return
+    var item = root.markAllQueue.shift()
+    root.markSeen(item.jid, item.ts, root._markAllStep)
   }
 
   function openWebApp() { runAction(["webapp"], null) }
@@ -350,15 +461,6 @@ Panel {
   function openAttachment(jid, id) {
     root.busyKey = root.msgKey(jid, id)
     runAction(["open", String(jid), String(id)], function () { root.busyKey = "" })
-  }
-
-  function transcribe(jid, id) {
-    var key = root.msgKey(jid, id)
-    root.busyKey = key
-    runAction(["transcribe", String(jid), String(id)], function (payload) {
-      root.transcripts = root.withEntry(root.transcripts, key, String(payload.text || ""))
-      root.busyKey = ""
-    })
   }
 
   // --- voice reply ----------------------------------------------------------
@@ -653,10 +755,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: {
-        if (root.confirmInstallOpen) { root.confirmInstallOpen = false; return }
-        root.close()
-      }
+      onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
 
       Column {
@@ -671,14 +770,19 @@ Panel {
 
           Column {
             id: titleCol
-            anchors.left: parent.left
+            // Centered on the full header width (matching "WHO MAY NOTIFY
+            // ME" and the other section headers below), not just the space
+            // left of headerActions. The title text is short enough that
+            // this doesn't collide with the icons on the right.
+            anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - headerActions.implicitWidth - Style.space(8)
+            width: parent.width
             spacing: Style.space(2)
 
             Text {
               width: parent.width
-              text: root.widgetLabel !== "" ? root.widgetLabel : "WhatsApp"
+              horizontalAlignment: Text.AlignHCenter
+              text: root.widgetLabel !== "" ? root.widgetLabel : "Whatsmarchy"
               color: root.barForeground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.title
@@ -687,6 +791,7 @@ Panel {
             }
             Text {
               width: parent.width
+              horizontalAlignment: Text.AlignHCenter
               text: {
                 if (!root.everLoaded) return "loading…"
                 if (root.errorText !== "") return "unavailable"
@@ -716,6 +821,7 @@ Panel {
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
               fontSize: Style.font.icon
               visible: root.totalNew > 0
+              enabled: !root.markReadBusy
               onClicked: root.markAllSeen()
             }
             PanelActionButton {
@@ -742,6 +848,14 @@ Panel {
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
               fontSize: Style.font.icon
               onClicked: root.settingsOpen = !root.settingsOpen
+            }
+            PanelActionButton {
+              iconText: root.iconWhatsApp
+              tooltipText: "Open WhatsApp"
+              foreground: root.accentColor
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.icon
+              onClicked: root.openWebApp()
             }
           }
         }
@@ -786,9 +900,15 @@ Panel {
           visible: root.settingsOpen
 
           PanelSeparator { width: parent.width; foreground: root.barForeground; strength: 0.08 }
-          PanelSectionHeader { text: "WHO MAY NOTIFY ME"; foreground: root.barForeground }
+          PanelSectionHeader {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: "WHO MAY NOTIFY ME"
+            foreground: root.barForeground
+          }
 
           Row {
+            anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(6)
             Repeater {
               model: [
@@ -845,16 +965,46 @@ Panel {
             onChanged: function (values) { root.saveAllow(values) }
           }
 
-          PanelSectionHeader { text: "VOICE NOTES"; foreground: root.barForeground }
-
-          Text {
+          PanelSeparator { width: parent.width; foreground: root.barForeground; strength: 0.08 }
+          PanelSectionHeader {
             width: parent.width
-            text: root.whisperAvailable
-              ? "Playback and local transcription are both available."
-              : "Playback works. Transcription needs a local speech engine (" + root.whisperDetail + ")."
-            color: Util.alpha(root.barForeground, 0.7)
-            wrapMode: Text.WordWrap
-            font.pixelSize: Style.font.caption
+            horizontalAlignment: Text.AlignHCenter
+            text: "WHAT THE BAR SHOWS"
+            foreground: root.barForeground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(4)
+
+            Repeater {
+              model: [
+                { value: "Icon only",                          label: "Icon only" },
+                { value: "Count only",                         label: "Count only" },
+                { value: "Sender and count",                   label: "Sender and count" },
+                { value: "Message preview (nothing to hide)",  label: "Message preview" }
+              ]
+              delegate: Button {
+                required property var modelData
+                width: parent.width
+                text: modelData.label
+                bordered: true
+                selected: root.hostWidget && root.hostWidget.barDetail === modelData.value
+                foreground: root.barForeground
+                accent: root.accentColor
+                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                fontSize: Style.font.bodySmall
+                onClicked: root.setBarDetail(modelData.value)
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "\"Message preview\" puts the latest message text on screen — anyone nearby can read it."
+              color: Util.alpha(root.barForeground, 0.6)
+              wrapMode: Text.WordWrap
+              font.pixelSize: Style.font.caption
+            }
           }
 
           Text {
@@ -867,27 +1017,17 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          Button {
-            visible: !root.whisperAvailable
-            text: "Set up local transcription…"
-            bordered: true
-            foreground: root.barForeground
-            accent: root.accentColor
-            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-            fontSize: Style.font.bodySmall
-            // Opens a confirmation, which opens a terminal, which asks again
-            // before touching a single package. Nothing installs silently.
-            onClicked: root.confirmInstallOpen = true
-          }
-
           PanelSeparator { width: parent.width; foreground: root.barForeground; strength: 0.08 }
         }
 
         // --- chat list --------------------------------------------------------
         Text {
+          // Full panel width — titleCol above now centers on this same
+          // width too, so this lines up with it (and with the section
+          // headers below) without needing to match a narrower box anymore.
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
-          visible: root.everLoaded && root.errorText === "" && root.chats.length === 0
+          visible: root.everLoaded && root.errorText === "" && root.displayChats.length === 0
           text: root.paused ? "Notifications are paused." : "You're all caught up."
           color: Util.alpha(root.barForeground, 0.5)
           font.pixelSize: Style.font.bodySmall
@@ -898,7 +1038,7 @@ Panel {
         Flickable {
           id: chatScroll
           width: parent.width
-          visible: root.chats.length > 0
+          visible: root.displayChats.length > 0
           // Bounded so a busy morning cannot grow the panel past the screen;
           // beyond that the list scrolls instead.
           height: Math.min(chatColumn.implicitHeight, Style.space(430))
@@ -918,14 +1058,31 @@ Panel {
             spacing: Style.space(4)
 
             Repeater {
-              model: root.chats
+              model: root.displayChats
 
               delegate: Column {
                 id: chatItem
                 required property var modelData
                 readonly property bool expanded: root.expandedJid === modelData.jid
+                property bool justSent: false
                 width: chatColumn.width
                 spacing: Style.space(4)
+
+                Timer {
+                  id: sentFlashTimer
+                  interval: 1100
+                  onTriggered: chatItem.justSent = false
+                }
+
+                // Optimistic: flashes the moment the user commits (click or
+                // Enter), not once sendProc's async round-trip completes —
+                // waiting for the reply made the confirmation feel laggy.
+                function submitReply() {
+                  if (replyText.text.trim() === "") return
+                  chatItem.justSent = true
+                  sentFlashTimer.restart()
+                  root.sendReply(chatItem.modelData.jid, replyText.text)
+                }
 
                 Rectangle {
                   width: parent.width
@@ -949,6 +1106,7 @@ Panel {
                         root.openWebApp()
                       } else {
                         root.expandedJid = chatItem.modelData.jid
+                        root.expandedSnapshot = chatItem.modelData
                         // Land the cursor in the reply field on open: besides
                         // saving a click before typing, this is what makes a
                         // system-wide dictation hotkey (e.g. Omarchy's voxtype)
@@ -956,7 +1114,12 @@ Panel {
                         // currently has focus, so quick reply needs nothing
                         // dictation-specific of its own.
                         Qt.callLater(function() { replyText.forceActiveFocus() })
-                        root.markSeen(chatItem.modelData.jid, chatItem.modelData.lastTs)
+                        // Opening a chat no longer marks it seen — it used to,
+                        // which meant a slip while composing (closing the
+                        // panel by mistake before sending) dropped the chat
+                        // from the "new" list for good, with no way back to
+                        // it short of hunting it down in WhatsApp Web. A chat
+                        // now only clears via "Mark everything as read".
                         var msgs = chatItem.modelData.messages || []
                         for (var i = 0; i < msgs.length; i++) {
                           var m = msgs[i]
@@ -988,8 +1151,9 @@ Panel {
                       // Explicit width taken from the row's own geometry, not
                       // from sibling `width` values, so nothing here can form a
                       // width cycle with the enclosing Row.
-                      width: chatRow.width - Style.space(8) * 3 - Style.font.icon
+                      width: chatRow.width - Style.space(8) * 4 - Style.font.icon
                              - countBadge.implicitWidth - timeText.implicitWidth
+                             - markReadBtn.implicitWidth
                       text: String(chatItem.modelData.name)
                       // Contact and group names are chosen by whoever is
                       // messaging you. Text defaults to AutoText, which would
@@ -1025,6 +1189,24 @@ Panel {
                       color: Util.alpha(root.barForeground, 0.45)
                       font.pixelSize: Style.font.caption
                     }
+                    Button {
+                      id: markReadBtn
+                      anchors.verticalCenter: parent.verticalCenter
+                      // Per-row, not just "mark everything as read": without
+                      // this, opening one chat to reply (which no longer
+                      // auto-clears it — see the click handler above) left no
+                      // way to dismiss just that one once handled, short of
+                      // clearing the whole list.
+                      iconText: root.iconMarkRead
+                      tooltipText: "Mark this chat as read"
+                      bordered: true
+                      foreground: root.barForeground
+                      accent: root.accentColor
+                      fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                      fontSize: Style.font.caption
+                      enabled: !root.markReadBusy
+                      onClicked: root.markSeen(chatItem.modelData.jid, chatItem.modelData.lastTs)
+                    }
                   }
                 }
 
@@ -1048,10 +1230,6 @@ Panel {
                       readonly property string thumb: {
                         var p = root.mediaPaths[key]
                         return (p !== undefined && p !== "") ? p : ""
-                      }
-                      readonly property string transcript: {
-                        var t = root.transcripts[key]
-                        return t === undefined ? "" : t
                       }
                       // Explicit: the enclosing Column has a real width, and
                       // the Texts below bind to *this* width.
@@ -1126,9 +1304,13 @@ Panel {
                         }
                         Button {
                           anchors.verticalCenter: parent.verticalCenter
+                          // Audio only: the underlying player (spawn_player in
+                          // wa-ctl.sh) deliberately runs mpv/ffplay with video
+                          // output suppressed, since that is exactly what a
+                          // voice note wants. Video played the same way was
+                          // just silent — right audio pipeline, wrong player
+                          // mode for anything with a picture.
                           visible: String(msgItem.modelData.mediaType) === "audio"
-                                   || String(msgItem.modelData.mediaType) === "video"
-                                   || String(msgItem.modelData.mediaType) === "gif"
                           text: msgItem.busy ? "…" : "Play"
                           iconText: root.iconPlay
                           bordered: true
@@ -1140,22 +1322,14 @@ Panel {
                         }
                         Button {
                           anchors.verticalCenter: parent.verticalCenter
-                          // Only offered for voice notes, and only when a local
-                          // engine actually exists — an always-visible button
-                          // that errors on click is worse than no button.
-                          visible: msgItem.modelData.isVoice === true && root.whisperAvailable
-                          text: msgItem.busy ? "…" : "Transcribe"
-                          bordered: true
-                          foreground: root.barForeground
-                          accent: root.accentColor
-                          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-                          fontSize: Style.font.caption
-                          onClicked: root.transcribe(chatItem.modelData.jid, msgItem.modelData.id)
-                        }
-                        Button {
-                          anchors.verticalCenter: parent.verticalCenter
+                          // Video and gif hand off to the system's default
+                          // handler (same path as documents/images) instead
+                          // of a dedicated in-panel player — simplest fix that
+                          // actually shows a picture.
                           visible: String(msgItem.modelData.mediaType) === "document"
                                    || String(msgItem.modelData.mediaType) === "image"
+                                   || String(msgItem.modelData.mediaType) === "video"
+                                   || String(msgItem.modelData.mediaType) === "gif"
                           text: "Open"
                           bordered: true
                           foreground: root.barForeground
@@ -1164,17 +1338,6 @@ Panel {
                           fontSize: Style.font.caption
                           onClicked: root.openAttachment(chatItem.modelData.jid, msgItem.modelData.id)
                         }
-                      }
-
-                      Text {
-                        width: parent.width
-                        visible: msgItem.transcript !== ""
-                        text: "“" + msgItem.transcript + "”"
-                        textFormat: Text.PlainText
-                        color: Util.alpha(root.barForeground, 0.8)
-                        wrapMode: Text.WordWrap
-                        font.pixelSize: Style.font.caption
-                        font.italic: true
                       }
                     }
                   }
@@ -1190,9 +1353,15 @@ Panel {
                     width: chatColumn.width - Style.space(16)
                     spacing: Style.space(6)
 
-                    TextField {
-                      id: replyText
-                      anchors.verticalCenter: parent.verticalCenter
+                    // A single-line TextField can't grow, so a long reply
+                    // scrolled out of view while typing. QtQuick.Controls'
+                    // TextField is fixed-height by design — this wraps a
+                    // TextArea instead, styled to match qs.Ui's TextField
+                    // (same border/fill treatment), growing up to a cap and
+                    // then scrolling internally.
+                    Flickable {
+                      id: replyFlick
+                      anchors.top: parent.top
                       // micBtn's share is conditional: a Row gives an invisible
                       // child neither width nor spacing, so subtracting for one
                       // that isn't there would leave a permanent gap at the end
@@ -1200,11 +1369,64 @@ Panel {
                       width: replyRow.width - sendBtn.implicitWidth - webBtn.implicitWidth
                              - (micBtn.visible ? micBtn.implicitWidth + Style.space(6) : 0)
                              - Style.space(6) * 2
-                      placeholderText: "Reply…"
-                      foreground: root.barForeground
-                      accent: root.accentColor
-                      enabled: !sendProc.running
-                      onAccepted: root.sendReply(chatItem.modelData.jid, replyText.text)
+                      // Grows with the text up to a ~4-line cap, then scrolls
+                      // internally. An earlier attempt at this looked like it
+                      // wasn't recalculating implicitHeight, so it was pinned
+                      // to a fixed ~4-line box; the real cause was the broken
+                      // wrapMode below (no wrapping means the text is always
+                      // one line, so implicitHeight never grows). Pinning it
+                      // also left the field's bordered background — sized to
+                      // the TextArea, not to this Flickable — floating at the
+                      // top of a 76px slot, which is what put the buttons out
+                      // of line with the visible input.
+                      height: Math.max(Style.space(28),
+                                       Math.min(Style.space(76), replyText.implicitHeight))
+                      contentWidth: width
+                      contentHeight: Math.max(height, replyText.implicitHeight)
+                      clip: true
+                      boundsBehavior: Flickable.StopAtBounds
+
+                      readonly property var _borderSpec:
+                        Border.controlSpec(replyText.activeFocus ? "focus" : "normal", root.barForeground, root.accentColor)
+
+                      QQC.TextArea {
+                        id: replyText
+                        width: replyFlick.width
+                        // TextEdit, not TextArea: QtQuick.Controls is imported
+                        // qualified (as QQC), so the bare name `TextArea` does
+                        // not exist here and `TextArea.WordWrap` threw a
+                        // ReferenceError, silently leaving wrapMode at its
+                        // NoWrap default. TextArea derives from TextEdit and
+                        // shares the enum, and TextEdit comes in unqualified
+                        // with `import QtQuick`.
+                        wrapMode: TextEdit.WordWrap
+                        placeholderText: "Reply…"
+                        color: root.barForeground
+                        placeholderTextColor: Qt.darker(root.barForeground, 1.6)
+                        selectionColor: Style.selectionFillFor(root.barForeground, root.accentColor)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        leftPadding: Style.spacing.controlPaddingX + Border.left(replyFlick._borderSpec)
+                        rightPadding: Style.spacing.controlPaddingX + Border.right(replyFlick._borderSpec)
+                        topPadding: Style.spacing.inputPaddingY + Border.top(replyFlick._borderSpec)
+                        bottomPadding: Style.spacing.inputPaddingY + Border.bottom(replyFlick._borderSpec)
+                        enabled: !sendProc.running
+                        background: BorderSurface {
+                          color: Style.controlFill(replyText.activeFocus, replyText.hovered, root.barForeground, root.accentColor)
+                          borderSpec: replyFlick._borderSpec
+                          radius: Style.cornerRadius
+                        }
+                        // Return sends; Shift+Return inserts a literal newline
+                        // for a genuinely multi-paragraph reply.
+                        Keys.onReturnPressed: function (event) {
+                          if (event.modifiers & Qt.ShiftModifier) { event.accepted = false }
+                          else { chatItem.submitReply(); event.accepted = true }
+                        }
+                        Keys.onEnterPressed: function (event) {
+                          if (event.modifiers & Qt.ShiftModifier) { event.accepted = false }
+                          else { chatItem.submitReply(); event.accepted = true }
+                        }
+                      }
 
                       Connections {
                         target: root
@@ -1215,10 +1437,12 @@ Panel {
                     }
                     Button {
                       id: micBtn
-                      anchors.verticalCenter: parent.verticalCenter
+                      // Top-aligned rather than centered: replyFlick is now a
+                      // fixed ~4-line box, and centering left these floating
+                      // in the middle of it, well below the first line of text.
+                      anchors.top: parent.top
                       // Hidden rather than shown-and-failing when there is no
-                      // recorder or no Opus encoder, on the same grounds as the
-                      // Transcribe button.
+                      // recorder or no Opus encoder available.
                       visible: root.voiceAvailable
                       iconText: root.iconMic
                       tooltipText: "Record a voice note (you can listen back before it sends)"
@@ -1232,20 +1456,25 @@ Panel {
                     }
                     Button {
                       id: sendBtn
-                      anchors.verticalCenter: parent.verticalCenter
-                      iconText: root.iconSend
+                      anchors.top: parent.top
+                      // Briefly swaps to a checkmark on success — sending had no
+                      // visible confirmation before, whether triggered by this
+                      // button or by pressing Enter in the field.
+                      iconText: chatItem.justSent ? root.iconMarkRead : root.iconSend
                       tooltipText: "Send"
                       bordered: true
                       enabled: !sendProc.running
-                      foreground: root.barForeground
+                      foreground: chatItem.justSent ? root.accentColor : root.barForeground
                       accent: root.accentColor
                       fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
                       fontSize: Style.font.icon
-                      onClicked: root.sendReply(chatItem.modelData.jid, replyText.text)
+                      onClicked: chatItem.submitReply()
+
+                      Behavior on foreground { ColorAnimation { duration: 150 } }
                     }
                     Button {
                       id: webBtn
-                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.top: parent.top
                       iconText: root.iconOpen
                       tooltipText: "Open WhatsApp Web (opens the inbox — WhatsApp has no per-chat link)"
                       bordered: true
@@ -1412,17 +1641,43 @@ Panel {
         }
       }
 
-      ConfirmDialog {
+      // Blocks input while a real read receipt is in flight (see
+      // markReadBusy) — the sync service is briefly down during that window,
+      // and a click landing on something else mid-restart is exactly the
+      // kind of race this exists to prevent.
+      Rectangle {
         anchors.fill: parent
-        opened: root.confirmInstallOpen
-        message: "Open a terminal to set up local voice-note transcription?\n\nIt will show exactly which packages and downloads are involved and ask you to confirm again before changing anything. Nothing is installed by this button."
-        confirmText: "Open terminal"
-        cancelText: "Cancel"
-        foreground: root.barForeground
-        onCanceled: root.confirmInstallOpen = false
-        onConfirmed: {
-          root.confirmInstallOpen = false
-          root.runAction(["install-whisper"], null)
+        visible: root.markReadBusy
+        color: Util.alpha("#000000", 0.35)
+
+        MouseArea { anchors.fill: parent; onClicked: function () {} }
+
+        Row {
+          anchors.centerIn: parent
+          spacing: Style.space(8)
+
+          Text {
+            id: markReadSpinner
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.iconRefresh
+            color: root.barForeground
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.icon
+
+            RotationAnimator {
+              target: markReadSpinner
+              from: 0; to: 360
+              duration: 800
+              loops: Animation.Infinite
+              running: root.markReadBusy
+            }
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Marking as read…"
+            color: root.barForeground
+            font.pixelSize: Style.font.bodySmall
+          }
         }
       }
     }

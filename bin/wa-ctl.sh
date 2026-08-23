@@ -15,7 +15,6 @@ umask 077
 
 # shellcheck source=lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"error":"jq is not installed"}\n'; exit 0; }
 
@@ -190,6 +189,47 @@ cmd_set_allow() {
   emit_ok --argjson count "$(printf '%s' "$allow" | jq 'length')"
 }
 
+# Real WhatsApp read receipts, on top of this widget's own local watermark.
+#
+# wacli's store lock is held exclusively for the entire lifetime of
+# `wacli sync --follow` — confirmed by hand: `wacli send` works fine
+# alongside it, `wacli chats mark-read` does not (an asymmetry in wacli
+# itself, nothing to route around from here). So marking read for real means
+# briefly stopping the sync service, sending the receipt(s), and starting it
+# back up. A few seconds without new messages arriving, traded for the phone
+# actually showing "read" — an accepted, deliberate tradeoff.
+#
+# Best-effort and silent on failure: this must never block or fail the local
+# watermark update, which is the part the widget's own state depends on.
+mark_read_remote() {
+  # One or more JIDs on stdin, one per line, so this stops/starts the sync
+  # service exactly once regardless of how many chats are being cleared.
+  command -v systemctl >/dev/null 2>&1 || return 0
+  command -v wacli >/dev/null 2>&1 || return 0
+  local jid count=0
+  # Without this trap, anything that kills this process between stop and
+  # start (the panel closing, a shell reload, an OOM kill) leaves
+  # whatsmarchy-sync stopped for good — it is Restart=on-failure, which does
+  # not cover a clean stop. RETURN also covers every early `return` below.
+  trap 'systemctl --user start whatsmarchy-sync >/dev/null 2>&1' EXIT INT TERM RETURN
+  systemctl --user stop whatsmarchy-sync >/dev/null 2>&1
+  while IFS= read -r jid; do
+    [[ -n "$jid" ]] || continue
+    is_jid "$jid" || continue
+    # Capped so one "mark everything as read" cannot chain an unbounded
+    # number of 5s lock-waits (below) into a multi-minute widget-wide freeze.
+    (( count >= 30 )) && break
+    (( count++ ))
+    # --lock-wait absorbs the gap between `systemctl stop` returning and the
+    # store's own lock file actually clearing (the two are not synchronized) —
+    # without it, this silently no-ops in that window: the local watermark
+    # still advances (mark-seen doesn't go through this path) so the chat
+    # still disappears from the widget, but the phone never sees it as read.
+    wacli chats mark-read --chat "$jid" --json --lock-wait 5s >/dev/null 2>&1
+  done
+  return 0
+}
+
 # mark-seen moves a chat's acknowledgement watermark forward. Never backward:
 # a stale panel payload replaying an old timestamp must not resurrect messages
 # the user already dismissed.
@@ -200,27 +240,15 @@ cmd_mark_seen() {
   # The timestamp comes from a WhatsApp message and the merge below is
   # deliberately monotonic-forward. A message dated in the future would
   # therefore pin this chat's watermark to the future and hide every genuine
-  # message from that contact from then on — permanently, since mark-all-seen
-  # is written to preserve entries above the global watermark. Clamped to now.
+  # message from that contact from then on — permanently, since nothing here
+  # ever moves a per-chat watermark backward. Clamped to now.
   now="$(date +%s)"
   (( ts > now )) && ts="$now"
   cfg="$(read_config | jq -c --slurpfile j <(json_arg "$(json_string "$jid")") --argjson t "$ts" \
     '.seen[$j[0]] = ([(.seen[$j[0]] // 0), $t] | max)')" || emit_error "could not update config"
   write_config "$cfg" || emit_error "cannot write $(config_path)"
+  printf '%s\n' "$jid" | mark_read_remote
   emit_ok --argjson done true
-}
-
-cmd_mark_all_seen() {
-  local ts="${1:-}" cfg
-  [[ -n "$ts" ]] || ts="$(date +%s)"
-  is_uint "$ts" || emit_error "invalid timestamp"
-  # Bumping seenAll alone would leave stale per-chat entries below it in place;
-  # they are dropped so the file does not grow without bound.
-  cfg="$(read_config | jq -c --argjson t "$ts" \
-    '.seenAll = ([.seenAll, $t] | max)
-     | .seen = (.seen | with_entries(select(.value > $t)))')" || emit_error "could not update config"
-  write_config "$cfg" || emit_error "cannot write $(config_path)"
-  emit_ok --argjson seenAll "$ts"
 }
 
 # ---------------------------------------------------------------------------
@@ -716,119 +744,6 @@ cmd_webapp() {
 }
 
 # ---------------------------------------------------------------------------
-# whisper — optional, entirely local voice-note transcription.
-#
-# Nothing here installs anything. `whisper-status` only looks; installing is a
-# separate subcommand that opens a terminal and asks the user to confirm.
-# ---------------------------------------------------------------------------
-find_whisper_model() {
-  [[ -n "${WHATSMARCHY_WHISPER_MODEL:-}" && -r "${WHATSMARCHY_WHISPER_MODEL}" ]] && {
-    printf '%s' "$WHATSMARCHY_WHISPER_MODEL"; return 0; }
-  local dir f
-  for dir in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/whatsmarchy/models" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/whisper.cpp/models" \
-    "$HOME/.cache/whisper.cpp/models" \
-    "/usr/share/whisper.cpp/models"
-  do
-    [[ -d "$dir" ]] || continue
-    f="$(find "$dir" -maxdepth 1 -type f -name 'ggml-*.bin' -print 2>/dev/null | sort | head -1)"
-    [[ -n "$f" ]] && { printf '%s' "$f"; return 0; }
-  done
-  return 1
-}
-
-detect_whisper() {
-  # Prints "<tool> <binary> <model-or-empty>" and returns 0, or returns 1.
-  local bin model
-  for bin in whisper-cli whisper-cpp main; do
-    command -v "$bin" >/dev/null 2>&1 || continue
-    # `main` is generic enough that it must not be picked up from a random
-    # project directory just because it happens to be on PATH.
-    [[ "$bin" == "main" && ! -e /usr/share/whisper.cpp ]] && continue
-    if model="$(find_whisper_model)"; then
-      printf '%s %s %s' "whisper.cpp" "$bin" "$model"
-      return 0
-    fi
-  done
-  if command -v whisper >/dev/null 2>&1; then
-    printf '%s %s %s' "openai-whisper" "whisper" ""
-    return 0
-  fi
-  return 1
-}
-
-cmd_whisper_status() {
-  local info tool bin model
-  if info="$(detect_whisper)"; then
-    read -r tool bin model <<<"$info"
-    emit_ok --argjson available true --arg tool "$tool" --arg bin "$bin" --arg model "${model:-}"
-  fi
-  # Distinguish "no engine at all" from "engine present but no model", because
-  # the fixes are completely different and the panel says so.
-  if command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1; then
-    emit_ok --argjson available false --arg reason "model" \
-      --arg detail "whisper.cpp is installed but no ggml model was found"
-  fi
-  emit_ok --argjson available false --arg reason "engine" \
-    --arg detail "no local transcription engine found"
-}
-
-cmd_transcribe() {
-  local jid="${1-}" msg_id="${2-}" path info tool bin model tmp wav text
-  is_jid "$jid"       || emit_error "invalid chat id"
-  is_msg_id "$msg_id" || emit_error "invalid message id"
-  info="$(detect_whisper)" || emit_error "no local transcription engine found"
-  read -r tool bin model <<<"$info"
-
-  resolve_media_path "$jid" "$msg_id"
-  path="$RESOLVED_MEDIA"
-  [[ -n "$path" && -s "$path" ]] || emit_error "attachment is not available locally"
-
-  tmp="$(mktemp -d "$CACHE_DIR/tx.XXXXXX")" || emit_error "cannot create work directory"
-  chmod 700 -- "$tmp" 2>/dev/null
-  trap 'rm -rf -- "$tmp"' EXIT
-
-  if [[ "$tool" == "whisper.cpp" ]]; then
-    require_cmd ffmpeg
-    wav="$tmp/audio.wav"
-    # whisper.cpp only reads 16 kHz mono PCM.
-    ffmpeg -nostdin -loglevel error -y -i "$path" -ar 16000 -ac 1 -c:a pcm_s16le "$wav" >/dev/null 2>&1 \
-      || emit_error "could not decode the voice note (ffmpeg failed)"
-    text="$("$bin" -m "$model" -f "$wav" -nt -np 2>/dev/null)" \
-      || emit_error "transcription failed"
-  else
-    "$bin" "$path" --output_format txt --output_dir "$tmp" --verbose False >/dev/null 2>&1 \
-      || emit_error "transcription failed"
-    text="$(cat -- "$tmp"/*.txt 2>/dev/null)"
-  fi
-
-  text="$(printf '%s' "$text" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')"
-  [[ -n "$text" ]] || emit_error "transcription produced no text"
-  # Piped, not passed with --arg: a transcript is the literal contents of a
-  # private voice note and must not sit in jq's /proc/<pid>/cmdline.
-  printf '%s' "$text" | jq -Rs --arg tool "$tool" '{ok: true, tool: $tool, text: .}'
-  exit 0
-}
-
-cmd_install_whisper() {
-  # Deliberately does not install anything. It opens a terminal running an
-  # interactive script that shows the exact commands and refuses to proceed
-  # without a typed confirmation. The panel gates this behind its own
-  # confirmation dialog first, so the user agrees twice.
-  local helper="$SELF_DIR/wa-install-whisper.sh"
-  [[ -x "$helper" ]] || emit_error "installer helper missing or not executable"
-  if command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
-    setsid omarchy-launch-floating-terminal-with-presentation "$helper" >/dev/null 2>&1 &
-  elif command -v omarchy-launch-terminal >/dev/null 2>&1; then
-    setsid omarchy-launch-terminal -e "$helper" >/dev/null 2>&1 &
-  else
-    emit_error "no terminal launcher found — run $helper yourself"
-  fi
-  emit_ok --arg helper "$helper"
-}
-
-# ---------------------------------------------------------------------------
 # `recipients` reads only wacli.db and never touches the plugin config, and its
 # consumer (MultiSelect's optionsCommand) expects a bare JSON array — an
 # {"ok":false} object would be rendered as a literal option row instead of an
@@ -844,7 +759,6 @@ case "${1-}" in
   set-mode)        shift; cmd_set_mode "$@" ;;
   set-allow)       shift; cmd_set_allow "$@" ;;
   mark-seen)       shift; cmd_mark_seen "$@" ;;
-  mark-all-seen)   shift; cmd_mark_all_seen "$@" ;;
   send)            shift; cmd_send "$@" ;;
   voice-status)    shift; cmd_voice_status "$@" ;;
   voice-record)    shift; cmd_voice_record "$@" ;;
@@ -855,8 +769,5 @@ case "${1-}" in
   play)            shift; cmd_play "$@" ;;
   open)            shift; cmd_open "$@" ;;
   webapp)          shift; cmd_webapp "$@" ;;
-  whisper-status)  shift; cmd_whisper_status "$@" ;;
-  transcribe)      shift; cmd_transcribe "$@" ;;
-  install-whisper) shift; cmd_install_whisper "$@" ;;
   *) emit_error "unknown subcommand: ${1:-<none>}" ;;
 esac

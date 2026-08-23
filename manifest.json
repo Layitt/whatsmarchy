@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "boyoyooo",
   "license": "MIT",
-  "description": "WhatsApp notifications in the Omarchy bar, powered by wacli. The bar shows who is waiting and how many messages — never the message text. Click for previews, image thumbnails, voice-note playback, optional local transcription, and a quick reply — typed, or recorded as a voice note you listen back to before it sends.",
+  "description": "WhatsApp notifications in the Omarchy bar, powered by wacli. The bar shows who is waiting and how many messages by default — message previews are opt-in. Click for previews, image/video/document opening, voice-note playback, and a quick reply — typed, or recorded as a voice note you listen back to before it sends.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {
@@ -20,7 +20,6 @@
       "barDetail": "Sender and count",
       "previewLimit": 4,
       "includeChannels": false,
-      "desktopNotifications": "Sender only",
       "hideWhenEmpty": false
     },
     "schema": [
@@ -45,9 +44,9 @@
         "key": "barDetail",
         "type": "enum",
         "label": "What the bar shows",
-        "options": ["Icon only", "Count only", "Sender and count"],
+        "options": ["Icon only", "Count only", "Sender and count", "Message preview (nothing to hide)"],
         "defaultValue": "Sender and count",
-        "description": "Message text is never shown in the bar, at any setting."
+        "description": "Message text stays off the bar unless you opt into \"Message preview\" — every other setting shows only who is waiting and how many."
       },
       {
         "key": "previewLimit",
@@ -64,14 +63,6 @@
         "label": "Include WhatsApp Channels",
         "defaultValue": false,
         "description": "Off by default: channels are usually broadcast noise rather than messages addressed to you."
-      },
-      {
-        "key": "desktopNotifications",
-        "type": "enum",
-        "label": "Desktop notifications",
-        "options": ["Off", "Sender only", "Sender and preview"],
-        "defaultValue": "Sender only",
-        "description": "\"Sender and preview\" puts message text on screen, which anyone nearby can read."
       },
       {
         "key": "hideWhenEmpty",

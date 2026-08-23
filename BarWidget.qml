@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Commons
 import qs.Ui
 
 BarWidget {
@@ -13,7 +14,6 @@ BarWidget {
   readonly property string barDetail:     setting("barDetail", "Sender and count")
   readonly property int    previewLimit:  Math.max(1, Math.min(20, setting("previewLimit", 4)))
   readonly property bool   includeChannels: setting("includeChannels", false)
-  readonly property string notifyMode:    setting("desktopNotifications", "Sender only")
   readonly property bool   hideWhenEmpty: setting("hideWhenEmpty", false)
 
   // --- state, consumed by Panel.qml ----------------------------------------
@@ -52,9 +52,9 @@ BarWidget {
     return idleColor
   }
 
-  // Bar text never includes message content — only who is waiting and how
-  // many. That is the whole point of the "how much is shown" spectrum: the
-  // always-visible surface leaks nothing a passer-by could read.
+  // Bar text includes message content only under the opt-in "Message preview"
+  // barDetail setting; every other setting shows just who is waiting and how
+  // many, so the always-visible surface leaks nothing by default.
   // topSender is a contact or group name — chosen by whoever is messaging you.
   // It reaches a Text and a tooltip, both of which default to auto-detecting
   // rich text, so markup characters and line breaks are stripped at the source
@@ -63,6 +63,20 @@ BarWidget {
     return String(s).replace(/[<>&]/g, " ").replace(/[\r\n\t]+/g, " ")
   }
   readonly property string safeSender: root.plain(root.topSender)
+
+  // Only reached when the user explicitly opts into "Message preview" —
+  // every other barDetail setting never calls this. Same truncation/plain()
+  // treatment as the sender name: attacker-controlled text, markup stripped.
+  readonly property string topPreview: {
+    if (root.chats.length === 0) return ""
+    var msgs = root.chats[0].messages || []
+    var last = msgs.length > 0 ? msgs[msgs.length - 1] : null
+    if (!last) return ""
+    var text = String(last.text || "")
+    if (!text && last.hasMedia) text = "[" + String(last.mediaType) + "]"
+    text = root.plain(text)
+    return text.length > 40 ? text.slice(0, 37) + "…" : text
+  }
 
   // A capped scan yields a floor, so the count is always shown with a "+"
   // rather than as an exact figure it cannot stand behind.
@@ -76,6 +90,11 @@ BarWidget {
     if (totalNew === 0) return ""
     if (barDetail === "Icon only")  return ""
     if (barDetail === "Count only") return countText
+    if (barDetail === "Message preview (nothing to hide)") {
+      if (chatCount === 1 && root.topPreview !== "") return root.safeSender + ": " + root.topPreview
+      if (chatCount === 1) return root.safeSender + " " + countText
+      return chatCount + " chats · " + countText
+    }
     // "Sender and count": one chat names it, several just say how many.
     if (chatCount === 1) return root.safeSender + " " + countText
     return chatCount + " chats · " + countText
@@ -141,10 +160,7 @@ BarWidget {
     root.topSender   = String(payload.topSender || "")
     root.chats       = Array.isArray(payload.chats) ? payload.chats : []
 
-    var incoming = typeof payload.totalNew === "number" ? payload.totalNew : 0
-    var previous = root.totalNew
-    root.totalNew = incoming
-    if (root.everNotified && incoming > previous && !root.paused) notifier.announce()
+    root.totalNew = typeof payload.totalNew === "number" ? payload.totalNew : 0
     root.everNotified = true
   }
 
@@ -167,6 +183,22 @@ BarWidget {
     }
   }
 
+  // refresh() no-ops while fetcher.running is true — one poll at a time. A
+  // poll that never comes back (wa-status.sh itself is timeout-guarded, but
+  // this covers anything else that could wedge the process) would otherwise
+  // silently and permanently disable every future refresh, including a
+  // manual click on the refresh button, until the shell was reloaded.
+  Timer {
+    running: fetcher.running
+    interval: 12000
+    onTriggered: {
+      if (fetcher.running) {
+        fetcher.running = false
+        root.errorText = "poller did not respond in time — try refresh again"
+      }
+    }
+  }
+
   Timer {
     // Floored at 5s so a hand-edited shell.json can't spin the poller. This
     // only reads a local SQLite file, so a short interval is cheap — but not
@@ -179,42 +211,13 @@ BarWidget {
   }
 
   // --- desktop notification --------------------------------------------------
-  // Opt-in, and content-free unless the user explicitly chose otherwise. The
-  // body is passed after `--` so a message starting with "-" is data, not a
-  // notify-send flag.
-  Process {
-    id: notifier
-    running: false
-    // Contact names and message bodies are attacker-controlled text. Most
-    // notification daemons render Pango markup in the summary and body, so
-    // angle brackets and ampersands are neutralised before they get there — a
-    // contact named "<b>Bank</b>" must not be able to style its own popup.
-    function sanitize(s) {
-      return String(s).replace(/[<>&]/g, " ").replace(/[\r\n\t]+/g, " ")
-    }
-
-    function announce() {
-      if (root.notifyMode === "Off") return
-      if (!root.chats || root.chats.length === 0) return
-      var chat = root.chats[0]
-      var title = notifier.sanitize(chat.name || "WhatsApp")
-      var body = chat.count + (chat.count === 1 ? " new message" : " new messages")
-      if (root.notifyMode === "Sender and preview") {
-        var msgs = chat.messages || []
-        var last = msgs.length > 0 ? msgs[msgs.length - 1] : null
-        if (last) {
-          var preview = String(last.text || "")
-          if (!preview && last.hasMedia) preview = "[" + String(last.mediaType) + "]"
-          if (preview) {
-            preview = notifier.sanitize(preview)
-            body = preview.length > 120 ? preview.slice(0, 117) + "…" : preview
-          }
-        }
-      }
-      notifier.command = ["notify-send", "-a", "Whatsmarchy", "-u", "normal", "--", title, body]
-      notifier.running = true
-    }
-  }
+  // Removed: notify-send popups were firing twice for a single message with
+  // no code-level cause found (ruled out: duplicate widget instance,
+  // duplicate shell process, a dedup guard keyed on jid+count). Rather than
+  // keep chasing what looks like a system/notification-daemon issue outside
+  // this plugin, new messages are signalled by the bar flash below only —
+  // it never leaves this widget's own rendering, so it can't double-fire the
+  // same way.
 
   Loader {
     id: panelLoader
@@ -273,7 +276,9 @@ BarWidget {
         textFormat: Text.PlainText
         color: root.stateColor
         font.family: button.fontFamily
-        font.pixelSize: button.fontSize
+        // Matches the size omARR uses for its Sonarr/Radarr logos
+        // (Style.space(16)), rather than inheriting the bar's body text size.
+        font.pixelSize: Style.space(16)
         renderType: Text.NativeRendering
       }
       Text {
@@ -292,7 +297,7 @@ BarWidget {
       // peripherally without a popup stealing focus.
       SequentialAnimation {
         id: pulse
-        loops: 2
+        loops: 4
         NumberAnimation { target: content; property: "opacity"; to: 0.25; duration: 160; easing.type: Easing.InOutQuad }
         NumberAnimation { target: content; property: "opacity"; to: 1.0;  duration: 160; easing.type: Easing.InOutQuad }
       }

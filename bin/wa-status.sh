@@ -111,7 +111,8 @@ SELECT COALESCE(json_group_array(json_object(
   'mediaType', mtype,
   'mime',      mime,
   'filename',  fname,
-  'localPath', lpath
+  'localPath', lpath,
+  'chatUnread', chat_unread
 )), '[]')
 FROM (
   SELECT
@@ -125,9 +126,17 @@ FROM (
     COALESCE(m.mime_type,'')  AS mime,
     COALESCE(m.filename,'')   AS fname,
     COALESCE(m.local_path,'') AS lpath,
-    COALESCE(NULLIF(c.name,''), NULLIF(g.name,''), NULLIF(cc.push_name,''),
+    -- chats.name has proven unreliable for groups — seen holding the chat's
+    -- own bare JID (right after a fresh pairing) and, separately, a message
+    -- sender's push_name (wacli apparently misattributing it at write time)
+    -- instead of the group's real name. groups.name has been correct every
+    -- time it has been checked, so for a group it is checked first, ahead of
+    -- chats.name rather than only as a fallback; chats.name still leads for
+    -- a DM, where there is no groups-table entry to prefer over it.
+    COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), m.chat_jid), NULLIF(cc.push_name,''),
              NULLIF(cc.full_name,''), NULLIF(cc.business_name,''), m.chat_jid)  AS chat_name,
-    c.kind AS kind
+    c.kind AS kind,
+    c.unread AS chat_unread
   FROM messages m
   JOIN chats c        ON c.jid  = m.chat_jid
   LEFT JOIN contacts ct ON ct.jid = m.sender_jid
@@ -155,7 +164,11 @@ FROM (
 # cannot mutate wacli's mirror, even if a future query were wrong. The query
 # text goes in over stdin rather than as an argument, so it never appears in
 # this process's /proc/<pid>/cmdline while the read is in flight.
-rows="$(printf '%s' "$SQL" | sqlite3 -readonly -noheader -batch -- "$DB" 2>&1)"
+# Bounded so this can never hang the poller indefinitely — the bar widget's
+# refresh() no-ops while a poll is in flight (one at a time), so a single
+# stuck sqlite3 call would permanently wedge every future poll, including a
+# manual click on the refresh button, until the shell itself was reloaded.
+rows="$(printf '%s' "$SQL" | timeout 8s sqlite3 -readonly -noheader -batch -- "$DB" 2>&1)"
 sqlite_status=$?
 if (( sqlite_status != 0 )); then
   emit_error "sqlite read failed: ${rows:-unknown error}"
@@ -188,6 +201,16 @@ printf '%s' "$rows" | jq -c \
   | ($cfg.allow | map({key: ., value: true}) | from_entries) as $allowSet
   # Per-chat watermark: the chat has its own timestamp once it has been
   # acknowledged, otherwise the global one set on first run.
+  #
+  # chatUnread (the read/unread flag wacli itself keeps, meant to mirror
+  # WhatsApp real-world state) is deliberately NOT used to gate this anymore.
+  # It proved unreliable
+  # in both directions: stuck at "unread" after a real phone read (the known
+  # app-state sync gap from pairing), and — worse — observed flipping an
+  # unrelated chat to "read" during a mark-read reconnect cycle, making a
+  # different, still-unread conversation vanish from the list with no click
+  # on it at all. The local watermark above has been correct every single
+  # time throughout extensive testing; chatUnread has not.
   | map(select(.ts > ($seen[.chatJid] // $seenAll)))
   | map(select($mode == "all" or ($allowSet[.chatJid] // false)))
   | group_by(.chatJid)
