@@ -3,10 +3,11 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "io.github.boyoyooo.whatsmarchy"
+  moduleName: "jitanjaforas.whatsmarchy"
 
   // --- settings, read from this widget's shell.json entry -------------------
   readonly property int    interval:      Math.max(5, setting("interval", 20))
@@ -41,13 +42,13 @@ BarWidget {
   readonly property string iconWhatsApp: "\u{F05A3}"
   readonly property string iconMuted:    "\u{F009B}"
 
-  readonly property color accentColor: "#25d366"   // WhatsApp green
-  readonly property color alertColor:  "#e5534b"
-  readonly property color idleColor: root.bar ? root.bar.barForeground : "#cccccc"
+  readonly property color accentColor: Color.accent
+  readonly property color alertColor:  Color.urgent
+  readonly property color idleColor:   Color.foreground
 
   readonly property color stateColor: {
     if (!healthy)         return alertColor
-    if (paused)           return Qt.rgba(idleColor.r, idleColor.g, idleColor.b, 0.55)
+    if (paused)           return Util.alpha(idleColor, 0.45)
     if (totalNew > 0)     return accentColor
     return idleColor
   }
@@ -264,11 +265,30 @@ BarWidget {
     implicitHeight: fixedHeight > 0 ? fixedHeight
       : (vertical ? Math.max(12, content.implicitHeight + scaledVerticalPadding * 2) : barSize)
 
+    DropArea {
+      id: barDropArea
+      anchors.fill: parent
+      onEntered: function (drag) {
+        drag.acceptProposedAction()
+        root.open()
+      }
+      onDropped: function (drop) {
+        var filePath = Model.getFilePathFromDrop(drop)
+        if (filePath && panelLoader.item) {
+          root.open()
+          panelLoader.item.attachDroppedFile(filePath)
+        }
+        drop.acceptProposedAction()
+      }
+    }
+
     Row {
       id: content
       anchors.centerIn: parent
       spacing: 4
       visible: !root.shouldHide
+      scale: barDropArea.containsDrag ? 1.15 : 1.0
+      Behavior on scale { NumberAnimation { duration: 150 } }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter

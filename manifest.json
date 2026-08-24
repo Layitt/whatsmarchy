@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.boyoyooo.whatsmarchy",
-  "name": "Whatsmarchy",
-  "version": "0.1.0",
-  "author": "boyoyooo",
+  "id": "jitanjaforas.whatsmarchy",
+  "name": "WhatsMarchy",
+  "version": "0.2.0",
+  "author": "Layitt / boyoyooo",
   "license": "MIT",
   "description": "WhatsApp notifications in the Omarchy bar, powered by wacli. The bar shows who is waiting and how many messages by default — message previews are opt-in. Click for previews, image/video/document opening, voice-note playback, and a quick reply — typed, or recorded as a voice note you listen back to before it sends.",
   "kinds": ["bar-widget"],

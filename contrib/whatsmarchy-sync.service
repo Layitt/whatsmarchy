@@ -6,6 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment="PATH=%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin"
 # Follow mode keeps the local SQLite mirror current. --download-media is left
 # off on purpose: Whatsmarchy fetches attachments on demand when you open a chat,
 # so the whole media stream does not land on disk unasked.

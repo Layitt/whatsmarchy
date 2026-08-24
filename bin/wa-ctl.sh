@@ -36,8 +36,7 @@ VOICE_BYTES_PER_SEC=$((VOICE_RATE * 2))   # mono s16
 # discarded — a crash, a logout, an OOM kill. It is microphone audio, so it goes.
 VOICE_MAX_AGE_MINUTES=180
 # Ceiling for anything handed to an image decoder, a media player, or a viewer.
-# 25 MiB is far above any preview worth showing and far below "fills the disk".
-MAX_MEDIA_BYTES=$((25 * 1024 * 1024))
+MAX_MEDIA_BYTES=$((500 * 1024 * 1024))
 # Previewed attachments are a cache, not a mailbox: without a bound, a group
 # that posts photos all day fills the disk with files the user merely glanced at.
 MEDIA_CACHE_MAX_AGE_DAYS=14
@@ -259,27 +258,70 @@ cmd_mark_seen() {
 # send; this plugin has no autonomous or scheduled send path of any kind.
 # ---------------------------------------------------------------------------
 cmd_send() {
-  local jid="${1-}" msg out
+  local jid="${1-}" reply_to="${2-}" reply_sender="${3-}" msg out
   is_jid "$jid" || emit_error "invalid chat id"
   require_cmd wacli
-  # Message body on stdin, not argv: reply text is the user's private content
-  # and does not belong in this script's /proc/<pid>/cmdline.
   msg="$(cat)"
   msg="${msg%$'\n'}"
   [[ -n "$msg" ]] || emit_error "empty message"
   (( ${#msg} <= 8000 )) || emit_error "message too long"
 
-  # `--` is not accepted by the wacli flag parser, but --message takes its
-  # value as a separate argv entry, so a body starting with '-' is still
-  # passed as data rather than parsed as a flag.
-  # NOTE: `wacli` takes the recipient and the message body as command-line
-  # arguments, so for the second or so the send is in flight they are visible in
-  # `ps` to other processes running as this user. That is wacli's interface and
-  # cannot be avoided from here; it is called out in the README rather than
-  # papered over. Everything on *this* side of the boundary stays off argv.
-  out="$(wacli send text --to "$jid" --message "$msg" --json 2>&1)"
+  local extra_flags=()
+  if [[ -n "$reply_to" ]]; then
+    extra_flags+=(--reply-to "$reply_to")
+    if [[ -n "$reply_sender" ]]; then
+      extra_flags+=(--reply-to-sender "$reply_sender")
+    fi
+  fi
+
+  out="$(wacli send text --to "$jid" --message "$msg" "${extra_flags[@]}" --post-send-wait 0 --lock-wait 5s --json 2>&1)"
   if (( $? != 0 )); then
     emit_error "send failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+  fi
+  emit_ok --argjson sent true
+}
+
+# ---------------------------------------------------------------------------
+# pick-file — opens desktop file dialog and returns chosen file info
+# ---------------------------------------------------------------------------
+cmd_pick_file() {
+  local path="${1-}"
+  if [[ -z "$path" ]]; then
+    if command -v zenity >/dev/null 2>&1; then
+      path="$(zenity --file-selection --title="Seleccionar archivo para enviar" 2>/dev/null || true)"
+    elif command -v kdialog >/dev/null 2>&1; then
+      path="$(kdialog --getopenfilename --title="Seleccionar archivo para enviar" 2>/dev/null || true)"
+    fi
+  fi
+  if [[ -n "$path" && -f "$path" && -r "$path" ]]; then
+    local size fname mime
+    size="$(stat -c '%s' -- "$path" 2>/dev/null || printf '0')"
+    fname="$(basename -- "$path")"
+    mime="$(file --brief --mime-type -- "$path" 2>/dev/null || printf 'application/octet-stream')"
+    emit_ok --arg path "$path" --arg name "$fname" --argjson size "$size" --arg mime "$mime"
+  else
+    emit_ok --arg path ""
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# send-file — sends a file to the recipient via wacli
+# ---------------------------------------------------------------------------
+cmd_send_file() {
+  local jid="${1-}" path="${2-}" caption="${3-}" out rc
+  is_jid "$jid" || emit_error "invalid chat id"
+  [[ -f "$path" && -r "$path" ]] || emit_error "file not found or not readable"
+  require_cmd wacli
+
+  local flags=(send file --to "$jid" --file "$path" --post-send-wait 0 --lock-wait 5s --json)
+  if [[ -n "$caption" ]]; then
+    flags+=(--caption "$caption")
+  fi
+
+  out="$(wacli "${flags[@]}" 2>&1)"
+  rc=$?
+  if (( rc != 0 )); then
+    emit_error "send file failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
   emit_ok --argjson sent true
 }
@@ -531,7 +573,7 @@ cmd_voice_send() {
   # Unlike a reply body, the arguments here are a path this plugin generated and
   # a JID the panel already puts on this script's own command line, so nothing
   # new is exposed in `ps` by passing them.
-  out="$(wacli send voice --to "$jid" --file "$staged" --mime 'audio/ogg; codecs=opus' --json 2>&1)"
+  out="$(wacli send voice --to "$jid" --file "$staged" --post-send-wait 0 --lock-wait 5s --json 2>&1)"
   rc=$?
   if (( rc != 0 )); then
     # Moved back under the name the panel knows, so Send can be pressed again.
@@ -608,12 +650,13 @@ resolve_media_path() {
             printf ".parameter set :mid '%s'\n" "$esc_mid"
             cat <<'SQL'
       SELECT json_object(
+        'chatJid',   COALESCE(chat_jid,''),
         'localPath', COALESCE(local_path,''),
         'mime',      COALESCE(mime_type,''),
         'type',      COALESCE(media_type,'')
       )
       FROM messages
-      WHERE chat_jid = :jid AND msg_id = :mid
+      WHERE msg_id = :mid
         AND deleted_at IS NULL AND payload_purged_at IS NULL
       LIMIT 1;
 SQL
@@ -627,6 +670,7 @@ SQL
   printf '%s' "$row" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || emit_error "unexpected media lookup result"
 
+  actual_chat_jid="$(printf '%s' "$row" | jq -r '.chatJid')"
   local_path="$(printf '%s' "$row" | jq -r '.localPath')"
   mime="$(printf '%s' "$row" | jq -r '.mime')"
 
@@ -659,14 +703,15 @@ SQL
   # kill — leaves a truncated file that the `[[ -s ]]` check above then serves
   # forever as a valid attachment. The rename is atomic, so two callers racing
   # on the same message cannot see a half-written file either.
-  local tmp
+  local tmp dl_chat
+  dl_chat="${actual_chat_jid:-$jid}"
   tmp="$(mktemp "$MEDIA_CACHE/.dl.XXXXXX")" || emit_error "cannot create a download temp file"
   chmod 600 -- "$tmp" 2>/dev/null
   trap 'rm -f -- "$tmp"' RETURN
   # --read-only keeps this out of session.db and off the store lock, so it
   # cannot disturb a running `wacli sync --follow`. Media is fetched straight
   # from WhatsApp's CDN using the key already stored in wacli.db.
-  out="$(wacli --read-only media download --chat "$jid" --id "$msg_id" --output "$tmp" 2>&1)"
+  out="$(wacli --read-only media download --chat "$dl_chat" --id "$msg_id" --output "$tmp" 2>&1)"
   if (( $? != 0 )) || [[ ! -s "$tmp" ]]; then
     emit_error "media download failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
@@ -746,6 +791,168 @@ cmd_open() {
 # so this deliberately opens the inbox and stops there rather than pretending
 # to jump to the clicked thread.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# all-chats — lists all conversations in wacli.db (recent/active chats)
+# ---------------------------------------------------------------------------
+cmd_all_chats() {
+  require_cmd sqlite3
+  local limit="${1:-50}" query="${2:-}" store db rows where_clause=""
+  is_uint "$limit" || limit=50
+  (( limit > 200 )) && limit=200
+
+  store="$(resolve_store_dir)" || emit_error "wacli store not found"
+  db="$store/wacli.db"
+  [[ -r "$db" ]] || emit_error "cannot read $db"
+
+  local clean_query
+  clean_query="$(printf '%s' "$query" | tr -cd '[:alnum:] @._-')"
+
+  if [[ -n "$clean_query" ]]; then
+    where_clause="AND (
+      c.jid LIKE '%${clean_query}%'
+      OR c.name LIKE '%${clean_query}%'
+      OR g.name LIKE '%${clean_query}%'
+      OR ct.push_name LIKE '%${clean_query}%'
+      OR ct.full_name LIKE '%${clean_query}%'
+      OR ct.first_name LIKE '%${clean_query}%'
+    )"
+  fi
+
+  rows="$( { sqlite3 -readonly -noheader -batch -- "$db" <<SQL 2>&1
+    SELECT COALESCE(json_group_array(json_object(
+      'jid', jid,
+      'name', replace(replace(replace(name, '<', ' '), '>', ' '), '&', ' '),
+      'kind', kind,
+      'lastTs', last_ts,
+      'unread', unread_cnt,
+      'snippet', replace(replace(replace(snippet, '<', ' '), '>', ' '), '&', ' '),
+      'lastSender', replace(replace(replace(last_sender, '<', ' '), '>', ' '), '&', ' ')
+    )), '[]')
+    FROM (
+      SELECT
+        c.jid AS jid,
+        substr(COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), c.jid), NULLIF(ct.push_name,''),
+                 NULLIF(ct.full_name,''), NULLIF(ct.business_name,''), c.jid), 1, $SQL_NAME_MAX) AS name,
+        c.kind AS kind,
+        COALESCE(c.last_message_ts, 0) AS last_ts,
+        c.unread_count AS unread_cnt,
+        substr(COALESCE(NULLIF(m.text,''), NULLIF(m.media_caption,''), NULLIF(m.display_text,''),
+                 CASE WHEN m.media_type IS NOT NULL AND m.media_type <> '' THEN '[' || m.media_type || ']' ELSE '' END), 1, $SQL_FIELD_MAX) AS snippet,
+        substr(COALESCE(NULLIF(m.sender_name,''), NULLIF(mct.push_name,''), NULLIF(mct.full_name,''), ''), 1, $SQL_NAME_MAX) AS last_sender
+      FROM chats c
+      LEFT JOIN groups g ON g.jid = c.jid
+      LEFT JOIN contacts ct ON ct.jid = c.jid
+      LEFT JOIN messages m ON m.rowid = (
+        SELECT m2.rowid FROM messages m2
+        WHERE m2.chat_jid = c.jid AND m2.deleted_at IS NULL AND m2.revoked = 0
+        ORDER BY m2.ts DESC LIMIT 1
+      )
+      LEFT JOIN contacts mct ON mct.jid = m.sender_jid
+      WHERE c.jid <> 'status@broadcast'
+        AND c.kind IN ('dm', 'group', 'newsletter')
+        $where_clause
+      ORDER BY COALESCE(c.last_message_ts, 0) DESC
+      LIMIT $limit
+    );
+SQL
+  } | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
+
+  printf '%s' "$rows" | jq -e 'type == "array"' >/dev/null 2>&1 \
+    || emit_error "unexpected query result"
+
+  printf '{"ok":true,"chats":%s}\n' "$rows"
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# chat-messages — retrieves recent messages for a specific chat
+# ---------------------------------------------------------------------------
+cmd_chat_messages() {
+  require_cmd sqlite3
+  local jid="${1:-}" limit="${2:-40}" search="${3-}" store db rows
+  is_jid "$jid" || emit_error "invalid JID: $jid"
+  is_uint "$limit" || limit=40
+  (( limit > 100 )) && limit=100
+
+  store="$(resolve_store_dir)" || emit_error "wacli store not found"
+  db="$store/wacli.db"
+  [[ -r "$db" ]] || emit_error "cannot read $db"
+
+  local search_where=""
+  if [[ -n "$search" ]]; then
+    local esc_search="${search//\'/\'\'}"
+    search_where="AND (m.text LIKE '%$esc_search%' OR m.media_caption LIKE '%$esc_search%' OR m.display_text LIKE '%$esc_search%' OR m.filename LIKE '%$esc_search%')"
+  fi
+
+  rows="$( { sqlite3 -readonly -noheader -batch -- "$db" <<SQL 2>&1
+    WITH target_jids AS (
+      SELECT '$jid' AS jid
+      UNION
+      SELECT c2.jid FROM chats c1 JOIN chats c2 ON c1.name = c2.name WHERE c1.jid = '$jid' AND c1.name IS NOT NULL AND c1.name != ''
+      UNION
+      SELECT c2.jid FROM contacts c1 JOIN contacts c2 ON (c1.push_name = c2.push_name OR c1.full_name = c2.full_name) WHERE c1.jid = '$jid' AND ((c1.push_name IS NOT NULL AND c1.push_name != '') OR (c1.full_name IS NOT NULL AND c1.full_name != ''))
+    )
+    SELECT COALESCE(json_group_array(json_object(
+      'id',             m.msg_id,
+      'chatJid',        m.chat_jid,
+      'ts',             m.ts,
+      'fromMe',         m.from_me = 1,
+      'sender',         replace(replace(replace(COALESCE(NULLIF(m.sender_name,''), NULLIF(ct.push_name,''), NULLIF(ct.full_name,''), CASE WHEN m.from_me = 1 THEN 'Tú' ELSE '' END), '<', ' '), '>', ' '), '&', ' '),
+      'senderJid',      COALESCE(m.sender_jid, ''),
+      'text',           COALESCE(NULLIF(m.text,''), NULLIF(m.media_caption,''), CASE WHEN m.display_text NOT IN ('(message)', 'Sent image', 'Sent video', 'Sent sticker', '[Audio]') THEN NULLIF(m.display_text,'') ELSE '' END, ''),
+      'mediaType',      COALESCE(m.media_type,''),
+      'mime',           COALESCE(m.mime_type,''),
+      'filename',       COALESCE(m.filename,''),
+      'localPath',      COALESCE(m.local_path,''),
+      'hasMedia',       CASE WHEN m.media_type IN ('image','video','gif','audio','document','sticker') THEN 1 ELSE 0 END,
+      'isVoice',        CASE WHEN m.media_type = 'audio' OR (LOWER(COALESCE(m.mime_type, '')) LIKE '%ogg%' OR LOWER(COALESCE(m.mime_type, '')) LIKE '%opus%') THEN 1 ELSE 0 END,
+      'quotedId',       COALESCE(m.quoted_msg_id, ''),
+      'quotedSender',   COALESCE(NULLIF(q.sender_name,''), NULLIF(qct.push_name,''), NULLIF(qct.full_name,''), CASE WHEN q.from_me = 1 THEN 'Tú' ELSE '' END, ''),
+      'quotedText',     COALESCE(NULLIF(q.text,''), NULLIF(q.media_caption,''), NULLIF(q.display_text,''), CASE WHEN q.media_type IS NOT NULL AND q.media_type != '' THEN '[' || q.media_type || ']' ELSE '' END, ''),
+      'quotedMediaType',COALESCE(q.media_type, ''),
+      'reactions',      COALESCE((
+        SELECT json_group_array(json_object(
+          'emoji', r.reaction_emoji,
+          'sender', COALESCE(NULLIF(r.sender_name,''), NULLIF(rct.push_name,''), NULLIF(rct.full_name,''), CASE WHEN r.from_me = 1 THEN 'Tú' ELSE '' END, ''),
+          'fromMe', r.from_me = 1
+        ))
+        FROM messages r
+        LEFT JOIN contacts rct ON rct.jid = r.sender_jid
+        WHERE r.chat_jid = m.chat_jid AND r.reaction_to_id = m.msg_id AND r.deleted_at IS NULL AND r.reaction_emoji IS NOT NULL AND r.reaction_emoji != ''
+      ), json('[]'))
+    )), '[]')
+    FROM (
+      SELECT *
+      FROM (
+        SELECT *
+        FROM messages m
+        WHERE m.chat_jid IN (SELECT jid FROM target_jids)
+          AND m.deleted_at IS NULL
+          AND m.revoked = 0
+          $search_where
+        ORDER BY m.ts DESC
+        LIMIT $limit
+      )
+      ORDER BY ts ASC
+    ) m
+    LEFT JOIN contacts ct ON ct.jid = m.sender_jid
+    LEFT JOIN messages q ON q.chat_jid = m.chat_jid AND q.msg_id = m.quoted_msg_id
+    LEFT JOIN contacts qct ON qct.jid = COALESCE(q.sender_jid, m.quoted_sender_jid);
+SQL
+  } | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
+
+  printf '{"ok":true,"jid":"%s","messages":%s}\n' "$jid" "$rows"
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# webapp — hand off to the official WhatsApp Web app.
+#
+# WhatsApp Web has no stable deep link to a specific existing conversation
+# (wa.me/<number> only opens a *new* chat compose and does nothing for groups),
+# so this deliberately opens the inbox and stops there rather than pretending
+# to jump to the clicked thread.
+# ---------------------------------------------------------------------------
 cmd_webapp() {
   local url="https://web.whatsapp.com/"
   if command -v omarchy-launch-or-focus-webapp >/dev/null 2>&1; then
@@ -758,6 +965,100 @@ cmd_webapp() {
   emit_ok --arg url "$url"
 }
 
+cmd_avatar() {
+  local jid="${1-}" hash cache_dir target none_flag
+  is_jid "$jid" || emit_error "invalid chat id"
+  require_cmd sha256sum
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy/avatars"
+  mkdir -p "$cache_dir"
+  hash="$(printf '%s' "$jid" | sha256sum | cut -d' ' -f1)"
+  target="$cache_dir/$hash.jpg"
+  none_flag="$cache_dir/$hash.none"
+
+  if [[ -s "$target" ]]; then
+    emit_ok --arg path "$target"
+    return 0
+  fi
+  if [[ -f "$none_flag" ]]; then
+    emit_ok --arg path ""
+    return 0
+  fi
+  emit_ok --arg path ""
+}
+
+cmd_sync_avatars() {
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy/avatars"
+  mkdir -p "$cache_dir"
+  chmod 700 "$cache_dir" 2>/dev/null || true
+  require_cmd sqlite3
+  require_cmd sha256sum
+  require_cmd jq
+  require_cmd curl
+  local store db jids missing j hash json url
+  store="$(resolve_store_dir)" || emit_error "wacli store not found"
+  db="$store/wacli.db"
+  [[ -r "$db" ]] || emit_error "cannot read $db"
+
+  jids="$(sqlite3 -batch -noheader "$db" "SELECT jid FROM chats WHERE kind IN ('dm','group') ORDER BY last_message_ts DESC LIMIT 30;" 2>/dev/null || true)"
+  missing=""
+  for j in $jids; do
+    [[ -n "$j" ]] || continue
+    is_jid "$j" || continue
+    hash="$(printf '%s' "$j" | sha256sum | cut -d' ' -f1)"
+    if [[ ! -s "$cache_dir/$hash.jpg" && ! -f "$cache_dir/$hash.none" ]]; then
+      missing="$missing $j"
+    fi
+  done
+
+  if [[ -n "$missing" ]]; then
+    trap 'systemctl --user start whatsmarchy-sync >/dev/null 2>&1' EXIT INT TERM RETURN
+    systemctl --user stop whatsmarchy-sync >/dev/null 2>&1 || true
+    for j in $missing; do
+      [[ -n "$j" ]] || continue
+      is_jid "$j" || continue
+      hash="$(printf '%s' "$j" | sha256sum | cut -d' ' -f1)"
+      json="$(wacli profile picture-info --jid "$j" --json 2>/dev/null || true)"
+      url="$(printf '%s' "$json" | jq -r '.data.url // empty' 2>/dev/null || true)"
+      if [[ -n "$url" && "$url" != "null" && "$url" =~ ^https?:// ]]; then
+        curl --proto =https,http -s -L -m 5 -- "$url" -o "$cache_dir/$hash.jpg" 2>/dev/null || true
+      else
+        touch "$cache_dir/$hash.none" 2>/dev/null || true
+      fi
+    done
+    systemctl --user start whatsmarchy-sync >/dev/null 2>&1 || true
+  fi
+  emit_ok --argjson synced true
+}
+
+cmd_react() {
+  local jid="${1-}" msg_id="${2-}" emoji="${3-}" sender="${4-}" out
+  is_jid "$jid" || emit_error "invalid chat id"
+  is_msg_id "$msg_id" || emit_error "invalid message id"
+  [[ -n "$emoji" ]] || emit_error "empty reaction emoji"
+  [[ "$emoji" =~ ^- ]] && emit_error "invalid reaction emoji"
+  if [[ -n "$sender" ]]; then
+    is_jid "$sender" || emit_error "invalid sender id"
+  fi
+  require_cmd wacli
+  out="$(wacli send react --to "$jid" --id "$msg_id" --reaction "$emoji" ${sender:+--sender "$sender"} --post-send-wait 0 --lock-wait 5s --json 2>&1)"
+  if (( $? != 0 )); then
+    emit_error "react failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+  fi
+  emit_ok --argjson reacted true
+}
+
+cmd_presence() {
+  local jid="${1-}" state="${2:-typing}" media="${3-}"
+  is_jid "$jid" || emit_error "invalid chat id"
+  require_cmd wacli
+  if [[ "$state" == "typing" ]]; then
+    wacli presence typing --to "$jid" ${media:+--media "$media"} --lock-wait 2s --json >/dev/null 2>&1 &
+  else
+    wacli presence paused --to "$jid" --lock-wait 2s --json >/dev/null 2>&1 &
+  fi
+  emit_ok --arg presence "$state"
+}
+
 # ---------------------------------------------------------------------------
 # `recipients` reads only wacli.db and never touches the plugin config, and its
 # consumer (MultiSelect's optionsCommand) expects a bare JSON array — an
@@ -765,22 +1066,26 @@ cmd_webapp() {
 # error. It is dispatched ahead of the config gate so it cannot emit that shape.
 [[ "${1-}" == "recipients" ]] && { shift; cmd_recipients "$@"; }
 
-# Checked once, here in the main shell, so a refusal is the script's answer
-# rather than a string captured inside a command substitution.
-assert_config_safe
-
 case "${1-}" in
-  config-get)      shift; cmd_config_get "$@" ;;
-  set-mode)        shift; cmd_set_mode "$@" ;;
-  set-allow)       shift; cmd_set_allow "$@" ;;
+  all-chats)       shift; cmd_all_chats "$@" ;;
+  chat-messages)   shift; cmd_chat_messages "$@" ;;
+  config-get)      assert_config_safe; shift; cmd_config_get "$@" ;;
+  set-mode)        assert_config_safe; shift; cmd_set_mode "$@" ;;
+  set-allow)       assert_config_safe; shift; cmd_set_allow "$@" ;;
   mark-seen)       shift; cmd_mark_seen "$@" ;;
   send)            shift; cmd_send "$@" ;;
+  react)           shift; cmd_react "$@" ;;
+  presence)        shift; cmd_presence "$@" ;;
+  pick-file)       shift; cmd_pick_file "$@" ;;
+  send-file)       shift; cmd_send_file "$@" ;;
   voice-status)    shift; cmd_voice_status "$@" ;;
   voice-record)    shift; cmd_voice_record "$@" ;;
   voice-play)      shift; cmd_voice_play "$@" ;;
   voice-send)      shift; cmd_voice_send "$@" ;;
   voice-discard)   shift; cmd_voice_discard "$@" ;;
   media)           shift; cmd_media "$@" ;;
+  avatar)          shift; cmd_avatar "$@" ;;
+  sync-avatars)    shift; cmd_sync_avatars "$@" ;;
   play)            shift; cmd_play "$@" ;;
   open)            shift; cmd_open "$@" ;;
   webapp)          shift; cmd_webapp "$@" ;;
