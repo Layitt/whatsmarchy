@@ -809,11 +809,21 @@ cmd_all_chats() {
   fi
   esc_query="${pattern//\'/\'\'}"
 
-  rows="$( { printf ".parameter set :lim %d\n" "$limit"
+  local session_db="$store/session.db"
+  local attach_cmd=""
+  local lid_lookup="''"
+  if [[ -r "$session_db" ]]; then
+    local esc_session="${session_db//\'/\'\'}"
+    attach_cmd="ATTACH DATABASE '$esc_session' AS session;"
+    lid_lookup="(SELECT replace(l.lid, '''', '') || '@lid' FROM session.whatsmeow_lid_map l WHERE replace(l.pn, '''', '') = replace(c.jid, '@s.whatsapp.net', ''))"
+  fi
+
+  rows="$( { [[ -n "$attach_cmd" ]] && printf "%s\n" "$attach_cmd"
+            printf ".parameter set :lim %d\n" "$limit"
             printf ".parameter set :query '%s'\n" "$esc_query"
             printf ".parameter set :name_max %d\n" "$SQL_NAME_MAX"
             printf ".parameter set :field_max %d\n" "$SQL_FIELD_MAX"
-            cat <<'SQL'
+            cat <<SQL
     SELECT COALESCE(json_group_array(json_object(
       'jid', jid,
       'name', replace(replace(replace(name, '<', ' '), '>', ' '), '&', ' '),
@@ -826,10 +836,17 @@ cmd_all_chats() {
     FROM (
       SELECT
         c.jid AS jid,
-        substr(COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), c.jid), NULLIF(ct.push_name,''),
-                 NULLIF(ct.full_name,''), NULLIF(ct.business_name,''), c.jid), 1, :name_max) AS name,
+        substr(COALESCE(NULLIF(g.name,''), NULLIF(ct.full_name,''), NULLIF(ct.push_name,''),
+                 NULLIF(ct.business_name,''), NULLIF(NULLIF(c.name,''), c.jid), c.jid), 1, :name_max) AS name,
         c.kind AS kind,
-        COALESCE(c.last_message_ts, 0) AS last_ts,
+        COALESCE(
+          (
+            SELECT MAX(m2.ts) FROM messages m2
+            WHERE (m2.chat_jid = c.jid OR m2.chat_jid = $lid_lookup)
+              AND m2.deleted_at IS NULL AND m2.revoked = 0
+          ),
+          c.last_message_ts, 0
+        ) AS last_ts,
         c.unread_count AS unread_cnt,
         substr(COALESCE(NULLIF(m.text,''), NULLIF(m.media_caption,''), NULLIF(m.display_text,''),
                  CASE WHEN m.media_type IS NOT NULL AND m.media_type <> '' THEN '[' || m.media_type || ']' ELSE '' END), 1, :field_max) AS snippet,
@@ -839,12 +856,14 @@ cmd_all_chats() {
       LEFT JOIN contacts ct ON ct.jid = c.jid
       LEFT JOIN messages m ON m.rowid = (
         SELECT m2.rowid FROM messages m2
-        WHERE m2.chat_jid = c.jid AND m2.deleted_at IS NULL AND m2.revoked = 0
+        WHERE (m2.chat_jid = c.jid OR m2.chat_jid = $lid_lookup)
+          AND m2.deleted_at IS NULL AND m2.revoked = 0
         ORDER BY m2.ts DESC LIMIT 1
       )
       LEFT JOIN contacts mct ON mct.jid = m.sender_jid
       WHERE c.jid <> 'status@broadcast'
-        AND c.kind IN ('dm', 'group', 'newsletter', 'unknown')
+        AND c.jid NOT LIKE '%@lid'
+        AND c.kind IN ('dm', 'group', 'newsletter')
         AND (
           :query = ''
           OR c.jid LIKE :query
@@ -854,7 +873,7 @@ cmd_all_chats() {
           OR ct.full_name LIKE :query
           OR ct.first_name LIKE :query
         )
-      ORDER BY COALESCE(c.last_message_ts, 0) DESC
+      ORDER BY last_ts DESC
       LIMIT :lim
     );
 SQL

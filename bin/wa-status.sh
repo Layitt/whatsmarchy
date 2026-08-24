@@ -90,9 +90,18 @@ MIN_TS="$(printf '%s' "$CONFIG" | jq -r '[.seenAll] + ([.seen[]] // []) | min | 
 is_uint "$MIN_TS" || MIN_TS="$SEEN_ALL"
 
 if [[ "$INCLUDE_CHANNELS" == "1" ]]; then
-  KIND_FILTER="'dm','group','newsletter','unknown'"
+  KIND_FILTER="'dm','group','newsletter'"
 else
-  KIND_FILTER="'dm','group','unknown'"
+  KIND_FILTER="'dm','group'"
+fi
+
+SESSION_DB="$STORE_DIR/session.db"
+ATTACH_SQL=""
+LID_PN_JID="m.chat_jid"
+if [[ -r "$SESSION_DB" ]]; then
+  ESC_SESSION="${SESSION_DB//\'/\'\'}"
+  ATTACH_SQL="ATTACH DATABASE '$ESC_SESSION' AS session;"
+  LID_PN_JID="COALESCE((SELECT replace(l.pn, '''', '') || '@s.whatsapp.net' FROM session.whatsmeow_lid_map l WHERE replace(l.lid, '''', '') = replace(m.chat_jid, '@lid', '')), m.chat_jid)"
 fi
 
 # MIN_TS / SCAN_LIMIT / PREVIEW_LIMIT are the only interpolated values and each
@@ -100,6 +109,7 @@ fi
 # literal chosen from two hard-coded alternatives. No caller-controlled string
 # reaches the SQL text.
 SQL="
+$ATTACH_SQL
 SELECT COALESCE(json_group_array(json_object(
   'chatJid',   chat_jid,
   'chatName',  chat_name,
@@ -116,7 +126,7 @@ SELECT COALESCE(json_group_array(json_object(
 )), '[]')
 FROM (
   SELECT
-    m.chat_jid AS chat_jid,
+    $LID_PN_JID AS chat_jid,
     m.msg_id   AS msg_id,
     m.ts       AS ts,
     substr(COALESCE(NULLIF(m.sender_name,''), NULLIF(ct.push_name,''), NULLIF(ct.full_name,''),
@@ -126,21 +136,14 @@ FROM (
     substr(COALESCE(m.mime_type,''),  1, $SQL_NAME_MAX) AS mime,
     substr(COALESCE(m.filename,''),   1, $SQL_PATH_MAX) AS fname,
     substr(COALESCE(m.local_path,''), 1, $SQL_PATH_MAX) AS lpath,
-    -- chats.name has proven unreliable for groups — seen holding the chat's
-    -- own bare JID (right after a fresh pairing) and, separately, a message
-    -- sender's push_name (wacli apparently misattributing it at write time)
-    -- instead of the group's real name. groups.name has been correct every
-    -- time it has been checked, so for a group it is checked first, ahead of
-    -- chats.name rather than only as a fallback; chats.name still leads for
-    -- a DM, where there is no groups-table entry to prefer over it.
-    substr(COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), m.chat_jid), NULLIF(cc.push_name,''),
-             NULLIF(cc.full_name,''), NULLIF(cc.business_name,''), m.chat_jid), 1, $SQL_NAME_MAX) AS chat_name,
-    c.kind AS kind,
+    substr(COALESCE(NULLIF(g.name,''), NULLIF(cc.full_name,''), NULLIF(cc.push_name,''), NULLIF(pcc.full_name,''), NULLIF(pcc.push_name,''), NULLIF(NULLIF(c.name,''), m.chat_jid), m.chat_jid), 1, $SQL_NAME_MAX) AS chat_name,
+    CASE WHEN m.chat_jid LIKE '%@lid' THEN 'dm' ELSE c.kind END AS kind,
     c.unread AS chat_unread
   FROM messages m
-  JOIN chats c        ON c.jid  = m.chat_jid
+  JOIN chats c          ON c.jid  = m.chat_jid
   LEFT JOIN contacts ct ON ct.jid = m.sender_jid
   LEFT JOIN contacts cc ON cc.jid = m.chat_jid
+  LEFT JOIN contacts pcc ON pcc.jid = $LID_PN_JID
   LEFT JOIN groups g    ON g.jid  = m.chat_jid
   WHERE m.from_me = 0
     AND m.ts > $MIN_TS
@@ -154,7 +157,7 @@ FROM (
     -- ordinary clock skew between this machine and WhatsApp's servers.
     AND m.ts <= strftime('%s','now') + 300
     AND m.chat_jid <> 'status@broadcast'
-    AND c.kind IN ($KIND_FILTER)
+    AND (c.kind IN ($KIND_FILTER) OR m.chat_jid LIKE '%@lid')
   ORDER BY m.ts DESC
   LIMIT $SCAN_LIMIT
 );
