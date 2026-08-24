@@ -332,15 +332,35 @@ Panel {
 
   signal replySent(string jid)
 
+  property var sendQueue: []
+
+  function pumpSend() {
+    if (sendProc.running) return
+    if (root.sendQueue.length === 0) return
+    var q = root.sendQueue.slice()
+    var job = q.shift()
+    root.sendQueue = q
+    root.busyKey = "send"
+    sendProc.currentJob = job
+    var cmd = [root.ctlScript, "send", job.jid]
+    if (job.replyId) {
+      cmd.push(job.replyId)
+      if (job.replySender) cmd.push(job.replySender)
+    }
+    sendProc.command = cmd
+    sendProc.stdinEnabled = true
+    sendProc.running = true
+  }
+
   Process {
     id: sendProc
     running: false
     stdinEnabled: false
-    property string body: ""
-    property string jid: ""
+    property var currentJob: null
     onStarted: {
-      write(sendProc.body + "\n")
-      sendProc.body = ""
+      if (sendProc.currentJob && sendProc.currentJob.body) {
+        write(sendProc.currentJob.body + "\n")
+      }
       stdinEnabled = false
     }
     stdout: StdioCollector {
@@ -348,17 +368,36 @@ Panel {
         root.busyKey = ""
         var payload = null
         try { payload = JSON.parse(this.text) } catch (e) { payload = null }
+        var jobJid = sendProc.currentJob ? sendProc.currentJob.jid : root.activeJid
+        var tempId = sendProc.currentJob ? sendProc.currentJob.tempId : ""
+        sendProc.currentJob = null
         if (!payload || payload.ok !== true) {
           root.actionError = String((payload && payload.error) || "send failed")
-          return
+          if (tempId) {
+            var markFailed = function(list) {
+              var res = []
+              for (var i = 0; i < (list || []).length; i++) {
+                var m = list[i]
+                if (m && m.id === tempId) res.push(Object.assign({}, m, { isFailed: true }))
+                else res.push(m)
+              }
+              return res
+            }
+            if (root.activeJid === jobJid) root.messages = markFailed(root.messages)
+            if (root.chatHistoryMap[jobJid]) {
+              root.chatHistoryMap = root.withEntry(root.chatHistoryMap, jobJid, markFailed(root.chatHistoryMap[jobJid]))
+            }
+          }
+        } else {
+          root.actionError = ""
+          root.replySent(jobJid)
+          root.autoMarkSeenAfterSend(jobJid)
+          root.loadChatMessages(jobJid, root.chatSearchQuery)
+          root.scheduleChatReload(jobJid)
         }
-        root.actionError = ""
-        root.replySent(sendProc.jid)
-        root.autoMarkSeenAfterSend(sendProc.jid)
-        root.loadChatMessages(sendProc.jid, root.chatSearchQuery)
-        root.scheduleChatReload(sendProc.jid)
       }
     }
+    onRunningChanged: if (!running) Qt.callLater(root.pumpSend)
   }
 
   Process {
@@ -494,7 +533,9 @@ Panel {
       quotedMediaType: "",
       reactions: []
     }
-    root.messages = root.messages.concat([tempFileMsg])
+    var updated = root.messages.concat([tempFileMsg])
+    root.messages = updated
+    root.chatHistoryMap = root.withEntry(root.chatHistoryMap, root.activeJid, updated)
     Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
 
     fileSendProc.command = [root.ctlScript, "send-file", root.activeJid, root.selectedFile.path, root.fileCaption]
@@ -625,21 +666,19 @@ Panel {
 
   function openWebApp() { runAction(["webapp"], null) }
 
-  function sendReply(jid, text, replyId, replySender) {
-    if (sendProc.running) return
+  function sendReply(jid, text, replyId, replySender, tempId) {
     var body = String(text || "").trim()
-    if (body === "") return
-    root.busyKey = "send"
-    sendProc.jid = String(jid)
-    sendProc.body = body
-    var cmd = [root.ctlScript, "send", String(jid)]
-    if (replyId) {
-      cmd.push(String(replyId))
-      if (replySender) cmd.push(String(replySender))
-    }
-    sendProc.command = cmd
-    sendProc.stdinEnabled = true
-    sendProc.running = true
+    if (body === "" || !jid) return
+    var q = root.sendQueue.slice()
+    q.push({
+      jid: String(jid),
+      body: body,
+      replyId: replyId ? String(replyId) : "",
+      replySender: replySender ? String(replySender) : "",
+      tempId: String(tempId || "")
+    })
+    root.sendQueue = q
+    pumpSend()
   }
 
   function sendReplyText() {
@@ -652,8 +691,9 @@ Panel {
     var rSender = root.replyingTo ? root.replyingTo.senderJid : ""
     var rQuoted = root.replyingTo
 
+    var tempId = "temp_" + Date.now()
     var tempMsg = {
-      id: "temp_" + Date.now(),
+      id: tempId,
       chatJid: root.activeJid,
       ts: Math.round(Date.now() / 1000),
       fromMe: true,
@@ -672,10 +712,12 @@ Panel {
       quotedMediaType: "",
       reactions: []
     }
-    root.messages = root.messages.concat([tempMsg])
+    var updated = root.messages.concat([tempMsg])
+    root.messages = updated
+    root.chatHistoryMap = root.withEntry(root.chatHistoryMap, root.activeJid, updated)
     Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
 
-    root.sendReply(root.activeJid, text, rId, rSender)
+    root.sendReply(root.activeJid, text, rId, rSender, tempId)
     root.replyingTo = null
     composer.text = ""
   }
@@ -921,7 +963,9 @@ Panel {
       reactions: []
     }
     if (root.activeJid === root.voiceJid) {
-      root.messages = root.messages.concat([tempVoiceMsg])
+      var updated = root.messages.concat([tempVoiceMsg])
+      root.messages = updated
+      root.chatHistoryMap = root.withEntry(root.chatHistoryMap, root.voiceJid, updated)
       Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
     }
 
@@ -2572,13 +2616,17 @@ Panel {
                         id: checkmarksText
                         visible: !!messageRow.modelData.fromMe
                         anchors.verticalCenter: metaText.verticalCenter
-                        text: (String(messageRow.modelData.id).indexOf("temp_") === 0 || messageRow.modelData.isPending === true)
-                          ? "🕒"
-                          : "✓✓"
-                        color: (text === "🕒")
-                          ? Util.alpha(root.contentForeground, 0.45)
-                          : root.accentColor
-                        font.pixelSize: (text === "🕒") ? Math.max(8, Style.font.caption - 3) : Style.font.caption
+                        text: (messageRow.modelData.isFailed === true)
+                          ? "❌"
+                          : ((String(messageRow.modelData.id).indexOf("temp_") === 0 || messageRow.modelData.isPending === true)
+                            ? "🕒"
+                            : "✓✓")
+                        color: (text === "❌")
+                          ? root.alertColor
+                          : ((text === "🕒")
+                            ? Util.alpha(root.contentForeground, 0.45)
+                            : root.accentColor)
+                        font.pixelSize: (text === "🕒" || text === "❌") ? Math.max(8, Style.font.caption - 3) : Style.font.caption
                         font.bold: true
                       }
                     }
