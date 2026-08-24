@@ -1300,7 +1300,7 @@ Panel {
               source: headerAvatar.headAvPath !== "" ? root.fileUrl(headerAvatar.headAvPath) : ""
               fillMode: Image.PreserveAspectCrop
               asynchronous: true
-              cache: true
+              cache: false
             }
 
             MultiEffect {
@@ -2051,7 +2051,7 @@ Panel {
                     source: avatarRect.avPath !== "" ? root.fileUrl(avatarRect.avPath) : ""
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
-                    cache: true
+                    cache: false
                   }
 
                   MultiEffect {

@@ -1091,7 +1091,7 @@ cmd_sync_avatars() {
         # - Strict response-size cap (--max-filesize)
         # - HTTP error failure flag (--fail)
         # - Download to atomic staging temp file, removed immediately on any failure
-        if curl --proto =https --proto-redir =https -s -L -f -m 4 --max-filesize "$MAX_AVATAR_BYTES" -- "$url" -o "$tmp_dl" 2>/dev/null \
+        if curl --proto =https --proto-redir =https -s -L -f -m 4 --max-filesize "$MAX_AVATAR_BYTES" -o "$tmp_dl" -- "$url" 2>/dev/null \
            && [[ -s "$tmp_dl" ]]; then
           mv -f -- "$tmp_dl" "$cache_dir/$hash.jpg" 2>/dev/null || rm -f -- "$tmp_dl"
         else
