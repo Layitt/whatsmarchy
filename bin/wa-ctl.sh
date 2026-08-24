@@ -772,12 +772,18 @@ cmd_play() {
 }
 
 cmd_open() {
-  local jid="${1-}" msg_id="${2-}" path
+  local jid="${1-}" msg_id="${2-}" path ext
   is_jid "$jid"       || emit_error "invalid chat id"
   is_msg_id "$msg_id" || emit_error "invalid message id"
   resolve_media_path "$jid" "$msg_id"
   path="$RESOLVED_MEDIA"
   [[ -n "$path" && -s "$path" ]] || emit_error "attachment is not available locally"
+  ext="$(printf '%s' "${path##*.}" | tr 'A-Z' 'a-z')"
+  case "$ext" in
+    desktop | sh | bash | py | exe | appimage | run | com | bat | cmd | bin)
+      emit_error "refusing to open executable file type ($ext) for security"
+      ;;
+  esac
   command -v xdg-open >/dev/null 2>&1 || emit_error "xdg-open is not installed"
   setsid xdg-open "$path" >/dev/null 2>&1 &
   emit_ok --arg path "$path"
@@ -796,7 +802,7 @@ cmd_open() {
 # ---------------------------------------------------------------------------
 cmd_all_chats() {
   require_cmd sqlite3
-  local limit="${1:-50}" query="${2:-}" store db rows where_clause=""
+  local limit="${1:-50}" query="${2:-}" store db rows
   is_uint "$limit" || limit=50
   (( limit > 200 )) && limit=200
 
@@ -804,21 +810,20 @@ cmd_all_chats() {
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
 
-  local clean_query
+  local clean_query pattern esc_query
   clean_query="$(printf '%s' "$query" | tr -cd '[:alnum:] @._-')"
-
   if [[ -n "$clean_query" ]]; then
-    where_clause="AND (
-      c.jid LIKE '%${clean_query}%'
-      OR c.name LIKE '%${clean_query}%'
-      OR g.name LIKE '%${clean_query}%'
-      OR ct.push_name LIKE '%${clean_query}%'
-      OR ct.full_name LIKE '%${clean_query}%'
-      OR ct.first_name LIKE '%${clean_query}%'
-    )"
+    pattern="%${clean_query}%"
+  else
+    pattern=""
   fi
+  esc_query="${pattern//\'/\'\'}"
 
-  rows="$( { sqlite3 -readonly -noheader -batch -- "$db" <<SQL 2>&1
+  rows="$( { printf ".parameter set :lim %d\n" "$limit"
+            printf ".parameter set :query '%s'\n" "$esc_query"
+            printf ".parameter set :name_max %d\n" "$SQL_NAME_MAX"
+            printf ".parameter set :field_max %d\n" "$SQL_FIELD_MAX"
+            cat <<'SQL'
     SELECT COALESCE(json_group_array(json_object(
       'jid', jid,
       'name', replace(replace(replace(name, '<', ' '), '>', ' '), '&', ' '),
@@ -832,13 +837,13 @@ cmd_all_chats() {
       SELECT
         c.jid AS jid,
         substr(COALESCE(NULLIF(g.name,''), NULLIF(NULLIF(c.name,''), c.jid), NULLIF(ct.push_name,''),
-                 NULLIF(ct.full_name,''), NULLIF(ct.business_name,''), c.jid), 1, $SQL_NAME_MAX) AS name,
+                 NULLIF(ct.full_name,''), NULLIF(ct.business_name,''), c.jid), 1, :name_max) AS name,
         c.kind AS kind,
         COALESCE(c.last_message_ts, 0) AS last_ts,
         c.unread_count AS unread_cnt,
         substr(COALESCE(NULLIF(m.text,''), NULLIF(m.media_caption,''), NULLIF(m.display_text,''),
-                 CASE WHEN m.media_type IS NOT NULL AND m.media_type <> '' THEN '[' || m.media_type || ']' ELSE '' END), 1, $SQL_FIELD_MAX) AS snippet,
-        substr(COALESCE(NULLIF(m.sender_name,''), NULLIF(mct.push_name,''), NULLIF(mct.full_name,''), ''), 1, $SQL_NAME_MAX) AS last_sender
+                 CASE WHEN m.media_type IS NOT NULL AND m.media_type <> '' THEN '[' || m.media_type || ']' ELSE '' END), 1, :field_max) AS snippet,
+        substr(COALESCE(NULLIF(m.sender_name,''), NULLIF(mct.push_name,''), NULLIF(mct.full_name,''), ''), 1, :name_max) AS last_sender
       FROM chats c
       LEFT JOIN groups g ON g.jid = c.jid
       LEFT JOIN contacts ct ON ct.jid = c.jid
@@ -850,12 +855,20 @@ cmd_all_chats() {
       LEFT JOIN contacts mct ON mct.jid = m.sender_jid
       WHERE c.jid <> 'status@broadcast'
         AND c.kind IN ('dm', 'group', 'newsletter')
-        $where_clause
+        AND (
+          :query = ''
+          OR c.jid LIKE :query
+          OR c.name LIKE :query
+          OR g.name LIKE :query
+          OR ct.push_name LIKE :query
+          OR ct.full_name LIKE :query
+          OR ct.first_name LIKE :query
+        )
       ORDER BY COALESCE(c.last_message_ts, 0) DESC
-      LIMIT $limit
+      LIMIT :lim
     );
 SQL
-  } | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
+  } | sqlite3 -readonly -noheader -batch -- "$db" 2>&1 | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
 
   printf '%s' "$rows" | jq -e 'type == "array"' >/dev/null 2>&1 \
     || emit_error "unexpected query result"
@@ -878,19 +891,23 @@ cmd_chat_messages() {
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
 
-  local search_where=""
+  local pattern="" esc_search esc_jid
   if [[ -n "$search" ]]; then
-    local esc_search="${search//\'/\'\'}"
-    search_where="AND (m.text LIKE '%$esc_search%' OR m.media_caption LIKE '%$esc_search%' OR m.display_text LIKE '%$esc_search%' OR m.filename LIKE '%$esc_search%')"
+    pattern="%${search}%"
   fi
+  esc_search="${pattern//\'/\'\'}"
+  esc_jid="${jid//\'/\'\'}"
 
-  rows="$( { sqlite3 -readonly -noheader -batch -- "$db" <<SQL 2>&1
+  rows="$( { printf ".parameter set :jid '%s'\n" "$esc_jid"
+            printf ".parameter set :lim %d\n" "$limit"
+            printf ".parameter set :search '%s'\n" "$esc_search"
+            cat <<'SQL'
     WITH target_jids AS (
-      SELECT '$jid' AS jid
+      SELECT :jid AS jid
       UNION
-      SELECT c2.jid FROM chats c1 JOIN chats c2 ON c1.name = c2.name WHERE c1.jid = '$jid' AND c1.name IS NOT NULL AND c1.name != ''
+      SELECT c2.jid FROM chats c1 JOIN chats c2 ON c1.name = c2.name WHERE c1.jid = :jid AND c1.name IS NOT NULL AND c1.name != ''
       UNION
-      SELECT c2.jid FROM contacts c1 JOIN contacts c2 ON (c1.push_name = c2.push_name OR c1.full_name = c2.full_name) WHERE c1.jid = '$jid' AND ((c1.push_name IS NOT NULL AND c1.push_name != '') OR (c1.full_name IS NOT NULL AND c1.full_name != ''))
+      SELECT c2.jid FROM contacts c1 JOIN contacts c2 ON (c1.push_name = c2.push_name OR c1.full_name = c2.full_name) WHERE c1.jid = :jid AND ((c1.push_name IS NOT NULL AND c1.push_name != '') OR (c1.full_name IS NOT NULL AND c1.full_name != ''))
     )
     SELECT COALESCE(json_group_array(json_object(
       'id',             m.msg_id,
@@ -929,9 +946,15 @@ cmd_chat_messages() {
         WHERE m.chat_jid IN (SELECT jid FROM target_jids)
           AND m.deleted_at IS NULL
           AND m.revoked = 0
-          $search_where
+          AND (
+            :search = ''
+            OR m.text LIKE :search
+            OR m.media_caption LIKE :search
+            OR m.display_text LIKE :search
+            OR m.filename LIKE :search
+          )
         ORDER BY m.ts DESC
-        LIMIT $limit
+        LIMIT :lim
       )
       ORDER BY ts ASC
     ) m
@@ -939,7 +962,7 @@ cmd_chat_messages() {
     LEFT JOIN messages q ON q.chat_jid = m.chat_jid AND q.msg_id = m.quoted_msg_id
     LEFT JOIN contacts qct ON qct.jid = COALESCE(q.sender_jid, m.quoted_sender_jid);
 SQL
-  } | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
+  } | sqlite3 -readonly -noheader -batch -- "$db" 2>&1 | head -c "$SQL_OUTPUT_MAX" )" || emit_error "sqlite read failed: $rows"
 
   printf '{"ok":true,"jid":"%s","messages":%s}\n' "$jid" "$rows"
   exit 0
@@ -970,16 +993,18 @@ cmd_avatar() {
   is_jid "$jid" || emit_error "invalid chat id"
   require_cmd sha256sum
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy/avatars"
-  mkdir -p "$cache_dir"
+  [[ -L "$cache_dir" ]] && emit_error "refusing to use a symlinked $cache_dir"
+  mkdir -p "$cache_dir" 2>/dev/null || emit_error "cannot create $cache_dir"
+  chmod 700 "$cache_dir" 2>/dev/null || true
   hash="$(printf '%s' "$jid" | sha256sum | cut -d' ' -f1)"
   target="$cache_dir/$hash.jpg"
   none_flag="$cache_dir/$hash.none"
 
-  if [[ -s "$target" ]]; then
+  if [[ -s "$target" && ! -L "$target" ]]; then
     emit_ok --arg path "$target"
     return 0
   fi
-  if [[ -f "$none_flag" ]]; then
+  if [[ -f "$none_flag" && ! -L "$none_flag" ]]; then
     emit_ok --arg path ""
     return 0
   fi
@@ -988,19 +1013,19 @@ cmd_avatar() {
 
 cmd_sync_avatars() {
   local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy/avatars"
-  mkdir -p "$cache_dir"
+  [[ -L "$cache_dir" ]] && emit_error "refusing to use a symlinked $cache_dir"
+  mkdir -p "$cache_dir" 2>/dev/null || emit_error "cannot create $cache_dir"
   chmod 700 "$cache_dir" 2>/dev/null || true
   require_cmd sqlite3
   require_cmd sha256sum
   require_cmd jq
   require_cmd curl
-  local store db jids missing j hash json url
+  local store db jids missing="" j hash json url count=0
   store="$(resolve_store_dir)" || emit_error "wacli store not found"
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
 
-  jids="$(sqlite3 -batch -noheader "$db" "SELECT jid FROM chats WHERE kind IN ('dm','group') ORDER BY last_message_ts DESC LIMIT 30;" 2>/dev/null || true)"
-  missing=""
+  jids="$(sqlite3 -readonly -batch -noheader "$db" "SELECT jid FROM chats WHERE kind IN ('dm','group') ORDER BY last_message_ts DESC LIMIT 20;" 2>/dev/null || true)"
   for j in $jids; do
     [[ -n "$j" ]] || continue
     is_jid "$j" || continue
@@ -1016,11 +1041,13 @@ cmd_sync_avatars() {
     for j in $missing; do
       [[ -n "$j" ]] || continue
       is_jid "$j" || continue
+      (( count >= 10 )) && break
+      (( count++ ))
       hash="$(printf '%s' "$j" | sha256sum | cut -d' ' -f1)"
-      json="$(wacli profile picture-info --jid "$j" --json 2>/dev/null || true)"
+      json="$(timeout 3s wacli profile picture-info --jid "$j" --json 2>/dev/null || true)"
       url="$(printf '%s' "$json" | jq -r '.data.url // empty' 2>/dev/null || true)"
-      if [[ -n "$url" && "$url" != "null" && "$url" =~ ^https?:// ]]; then
-        curl --proto =https,http -s -L -m 5 -- "$url" -o "$cache_dir/$hash.jpg" 2>/dev/null || true
+      if [[ -n "$url" && "$url" != "null" && "$url" =~ ^https:// ]]; then
+        curl --proto =https -s -L -m 4 -- "$url" -o "$cache_dir/$hash.jpg" 2>/dev/null || true
       else
         touch "$cache_dir/$hash.none" 2>/dev/null || true
       fi
@@ -1050,6 +1077,16 @@ cmd_react() {
 cmd_presence() {
   local jid="${1-}" state="${2:-typing}" media="${3-}"
   is_jid "$jid" || emit_error "invalid chat id"
+  case "$state" in
+    typing | paused) ;;
+    *) emit_error "invalid presence state: expected typing or paused" ;;
+  esac
+  if [[ -n "$media" ]]; then
+    case "$media" in
+      audio) ;;
+      *) emit_error "invalid presence media: expected audio" ;;
+    esac
+  fi
   require_cmd wacli
   if [[ "$state" == "typing" ]]; then
     wacli presence typing --to "$jid" ${media:+--media "$media"} --lock-wait 2s --json >/dev/null 2>&1 &

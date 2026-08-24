@@ -1589,6 +1589,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: root.selectedFile ? root.selectedFile.name : ""
+                  textFormat: Text.PlainText
                   color: root.contentForeground
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.caption
@@ -2146,6 +2147,7 @@ Panel {
                       visible: bubbleRow.showSender
                       width: Math.min(implicitWidth, bubbleRow.maxInner)
                       text: String(messageRow.modelData.sender || "")
+                      textFormat: Text.PlainText
                       color: root.accentColor
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
@@ -2186,6 +2188,7 @@ Panel {
                         Text {
                           width: parent.width
                           text: messageRow.modelData.quotedSender || "Mensaje"
+                          textFormat: Text.PlainText
                           color: root.accentColor
                           font.family: root.bar ? root.bar.fontFamily : Style.font.family
                           font.pixelSize: Style.font.caption
@@ -2196,6 +2199,7 @@ Panel {
                         Text {
                           width: parent.width
                           text: messageRow.modelData.quotedText || (messageRow.modelData.quotedMediaType ? "[" + messageRow.modelData.quotedMediaType + "]" : "...")
+                          textFormat: Text.PlainText
                           color: Util.alpha(root.contentForeground, 0.75)
                           font.family: root.bar ? root.bar.fontFamily : Style.font.family
                           font.pixelSize: Math.max(9, Style.font.caption - 1)
@@ -2384,6 +2388,7 @@ Panel {
                           Text {
                             width: parent.width
                             text: root.mediaLabel(messageRow.modelData)
+                            textFormat: Text.PlainText
                             color: root.contentForeground
                             font.family: root.bar ? root.bar.fontFamily : Style.font.family
                             font.pixelSize: Style.font.caption
@@ -2394,6 +2399,7 @@ Panel {
                           Text {
                             width: parent.width
                             text: String(messageRow.modelData.mime || messageRow.modelData.mediaType || "Archivo")
+                            textFormat: Text.PlainText
                             color: Util.alpha(root.contentForeground, 0.55)
                             font.family: root.bar ? root.bar.fontFamily : Style.font.family
                             font.pixelSize: Math.max(9, Style.font.caption - 2)
@@ -2569,6 +2575,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: "Respondiendo a " + (root.replyingTo ? root.replyingTo.sender : "")
+                  textFormat: Text.PlainText
                   color: root.accentColor
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.caption
@@ -2579,6 +2586,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: root.replyingTo ? root.replyingTo.text : ""
+                  textFormat: Text.PlainText
                   color: root.contentForeground
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Math.max(9, Style.font.caption - 1)
@@ -2723,6 +2731,7 @@ Panel {
                     Text {
                       width: parent.width
                       text: root.selectedFile ? root.selectedFile.name : ""
+                      textFormat: Text.PlainText
                       color: root.contentForeground
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.bodySmall
@@ -2733,6 +2742,7 @@ Panel {
                     Text {
                       width: parent.width
                       text: root.selectedFile ? root.formatBytes(root.selectedFile.size) : ""
+                      textFormat: Text.PlainText
                       color: Util.alpha(root.contentForeground, 0.6)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
