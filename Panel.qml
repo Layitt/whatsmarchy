@@ -1068,6 +1068,34 @@ Panel {
     onRunningChanged: if (!running) Qt.callLater(root.pumpAvatars)
   }
 
+  property bool syncingAvatars: false
+
+  Process {
+    id: syncAvatarsProc
+    running: false
+    command: [root.ctlScript, "sync-avatars", "force"]
+    onRunningChanged: root.syncingAvatars = running
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.avatarPaths = ({})
+        root.avatarQueue = []
+        for (var i = 0; i < root.chats.length; i++) {
+          if (root.chats[i] && root.chats[i].jid) root.queueAvatar(root.chats[i].jid)
+        }
+        for (var j = 0; j < root.allChatsList.length; j++) {
+          if (root.allChatsList[j] && root.allChatsList[j].jid) root.queueAvatar(root.allChatsList[j].jid)
+        }
+        if (root.activeJid) root.queueAvatar(root.activeJid)
+      }
+    }
+  }
+
+  function reloadAvatars() {
+    if (syncAvatarsProc.running) return
+    syncAvatarsProc.command = [root.ctlScript, "sync-avatars", "force"]
+    syncAvatarsProc.running = true
+  }
+
   Process {
     id: allChatsProc
     running: false
@@ -1702,6 +1730,27 @@ Panel {
                 onClicked: root.setBarDetail(modelData.value)
               }
             }
+          }
+
+          PanelSeparator { width: parent.width; foreground: root.contentForeground; strength: 0.08 }
+          PanelSectionHeader {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: "FOTOS DE PERFIL"
+            foreground: root.contentForeground
+          }
+
+          Button {
+            width: parent.width
+            text: root.syncingAvatars ? "Sincronizando fotos…" : "Recargar fotos de perfil"
+            icon: root.iconRefresh
+            bordered: true
+            enabled: !root.syncingAvatars
+            foreground: root.contentForeground
+            accent: root.accentColor
+            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            fontSize: Style.font.bodySmall
+            onClicked: root.reloadAvatars()
           }
 
           PanelSeparator { width: parent.width; foreground: root.contentForeground; strength: 0.08 }

@@ -1041,6 +1041,7 @@ cmd_avatar() {
 }
 
 cmd_sync_avatars() {
+  local force="${1-}"
   local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-whatsmarchy/avatars"
   [[ -L "$cache_dir" ]] && emit_error "refusing to use a symlinked $cache_dir"
   mkdir -p "$cache_dir" 2>/dev/null || emit_error "cannot create $cache_dir"
@@ -1054,10 +1055,14 @@ cmd_sync_avatars() {
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
 
+  if [[ "$force" == "1" || "$force" == "force" ]]; then
+    rm -f -- "$cache_dir"/*.jpg "$cache_dir"/*.none 2>/dev/null || true
+  fi
+
   # Prune avatars older than 30 days
   find "$cache_dir" -maxdepth 1 -type f -mtime +30 -delete 2>/dev/null || true
 
-  jids="$(sqlite3 -readonly -batch -noheader "$db" "SELECT jid FROM chats WHERE kind IN ('dm','group') ORDER BY last_message_ts DESC LIMIT 20;" 2>/dev/null || true)"
+  jids="$(sqlite3 -readonly -batch -noheader "$db" "SELECT jid FROM chats WHERE kind IN ('dm','group') ORDER BY last_message_ts DESC LIMIT 30;" 2>/dev/null || true)"
   for j in $jids; do
     [[ -n "$j" ]] || continue
     is_jid "$j" || continue
@@ -1073,10 +1078,10 @@ cmd_sync_avatars() {
     for j in $missing; do
       [[ -n "$j" ]] || continue
       is_jid "$j" || continue
-      (( count >= 10 )) && break
+      (( count >= 25 )) && break
       (( count++ ))
       hash="$(printf '%s' "$j" | sha256sum | cut -d' ' -f1)"
-      json="$(timeout 3s wacli profile picture-info --jid "$j" --json 2>/dev/null || true)"
+      json="$(timeout 4s wacli profile picture-info --jid "$j" --json --preview 2>/dev/null || true)"
       url="$(printf '%s' "$json" | jq -r '.data.url // empty' 2>/dev/null || true)"
       if [[ -n "$url" && "$url" != "null" && "$url" =~ ^https:// ]]; then
         tmp_dl="$(mktemp "$cache_dir/.dl.XXXXXX")" 2>/dev/null || continue
