@@ -168,7 +168,7 @@ BarWidget {
   property bool everNotified: false
 
   function refresh() {
-    if (fetcher.running) return
+    if (fetcher.running) fetcher.running = false
     fetcher.running = true
   }
 

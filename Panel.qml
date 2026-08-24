@@ -701,16 +701,37 @@ Panel {
       root.markReadPending = Math.max(0, root.markReadPending - 1)
       if (typeof onDone === "function") onDone()
     }
-    // Optimistic UI: clear badges immediately across all lists
-    for (var i = 0; i < root.chats.length; i++) {
-      if (root.chats[i].jid === jid) { root.chats[i].unread = 0; root.chats[i].count = 0 }
+
+    // 1. Optimistic UI: Update hostWidget.chats and totalNew immediately
+    if (root.hostWidget) {
+      var nextChats = []
+      var clearedCount = 0
+      for (var i = 0; i < (root.hostWidget.chats || []).length; i++) {
+        var c = root.hostWidget.chats[i]
+        if (c && c.jid === jid) {
+          clearedCount = Number(c.count || c.unread || 0)
+        } else if (c) {
+          nextChats.push(c)
+        }
+      }
+      root.hostWidget.chats = nextChats
+      root.hostWidget.totalNew = Math.max(0, (root.hostWidget.totalNew || 0) - clearedCount)
+      root.hostWidget.chatCount = nextChats.length
+      if (nextChats.length === 0) root.hostWidget.topSender = ""
     }
-    for (var j = 0; j < root.allChats.length; j++) {
-      if (root.allChats[j].jid === jid) { root.allChats[j].unread = 0; root.allChats[j].count = 0 }
+
+    // 2. Optimistic UI: Update allChatsList immediately
+    var nextAll = []
+    for (var a = 0; a < (root.allChatsList || []).length; a++) {
+      var item = root.allChatsList[a]
+      if (item && item.jid === jid) {
+        nextAll.push(Object.assign({}, item, { unread: 0, count: 0 }))
+      } else if (item) {
+        nextAll.push(item)
+      }
     }
-    for (var a = 0; a < root.allChatsList.length; a++) {
-      if (root.allChatsList[a].jid === jid) { root.allChatsList[a].unread = 0; root.allChatsList[a].count = 0 }
-    }
+    root.allChatsList = nextAll
+
     var effectiveTs = ts
     if (!effectiveTs && root.activeChat && root.activeChat.jid === jid) {
       effectiveTs = root.activeChat.lastTs
@@ -724,6 +745,7 @@ Panel {
       }
     }
     if (!effectiveTs) effectiveTs = Math.round(Date.now() / 1000)
+
     runAction(["mark-seen", String(jid), String(effectiveTs), "0"], function (p) {
       if (p && p.ok === true && root.hostWidget) root.hostWidget.refresh()
       done()
@@ -732,20 +754,33 @@ Panel {
 
   function autoMarkSeenAfterSend(jid) {
     if (!jid) return
-    for (var i = 0; i < root.chats.length; i++) {
-      if (root.chats[i].jid === jid) { root.chats[i].unread = 0; root.chats[i].count = 0 }
+    if (root.hostWidget) {
+      var nextChats = []
+      var clearedCount = 0
+      for (var i = 0; i < (root.hostWidget.chats || []).length; i++) {
+        var c = root.hostWidget.chats[i]
+        if (c && c.jid === jid) {
+          clearedCount = Number(c.count || c.unread || 0)
+        } else if (c) {
+          nextChats.push(c)
+        }
+      }
+      root.hostWidget.chats = nextChats
+      root.hostWidget.totalNew = Math.max(0, (root.hostWidget.totalNew || 0) - clearedCount)
+      root.hostWidget.chatCount = nextChats.length
     }
-    for (var j = 0; j < root.allChats.length; j++) {
-      if (root.allChats[j].jid === jid) { root.allChats[j].unread = 0; root.allChats[j].count = 0 }
+    var nextAll = []
+    for (var a = 0; a < (root.allChatsList || []).length; a++) {
+      var item = root.allChatsList[a]
+      if (item && item.jid === jid) {
+        nextAll.push(Object.assign({}, item, { unread: 0, count: 0 }))
+      } else if (item) {
+        nextAll.push(item)
+      }
     }
-    for (var a = 0; a < root.allChatsList.length; a++) {
-      if (root.allChatsList[a].jid === jid) { root.allChatsList[a].unread = 0; root.allChatsList[a].count = 0 }
-    }
-    var ts = 0
-    for (var k = 0; k < root.chats.length; k++) {
-      if (root.chats[k].jid === jid) { ts = root.chats[k].lastTs; break }
-    }
-    if (!ts) ts = Math.round(Date.now() / 1000)
+    root.allChatsList = nextAll
+
+    var ts = Math.round(Date.now() / 1000)
     runAction(["mark-seen", String(jid), String(ts), "0"], function (p) {
       if (p && p.ok === true && root.hostWidget) root.hostWidget.refresh()
     })
@@ -753,18 +788,20 @@ Panel {
 
   function markAllSeen() {
     root.markReadPending++
-    for (var i = 0; i < root.chats.length; i++) {
-      root.chats[i].unread = 0
-      root.chats[i].count = 0
+    // 1. Optimistic UI: Clear hostWidget immediately
+    if (root.hostWidget) {
+      root.hostWidget.chats = []
+      root.hostWidget.totalNew = 0
+      root.hostWidget.chatCount = 0
+      root.hostWidget.topSender = ""
     }
-    for (var j = 0; j < root.allChats.length; j++) {
-      root.allChats[j].unread = 0
-      root.allChats[j].count = 0
+    // 2. Optimistic UI: Clear allChatsList badges
+    var nextAll = []
+    for (var a = 0; a < (root.allChatsList || []).length; a++) {
+      var item = root.allChatsList[a]
+      if (item) nextAll.push(Object.assign({}, item, { unread: 0, count: 0 }))
     }
-    for (var a = 0; a < root.allChatsList.length; a++) {
-      root.allChatsList[a].unread = 0
-      root.allChatsList[a].count = 0
-    }
+    root.allChatsList = nextAll
 
     runAction(["mark-all-seen"], function (p) {
       root.markReadPending = Math.max(0, root.markReadPending - 1)
@@ -2279,39 +2316,75 @@ Panel {
                   }
                 }
 
-                Column {
+                Row {
                   id: rowMeta
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(2)
+                  spacing: Style.space(6)
+                  z: 2
 
-                  Text {
-                    id: stampText
-                    anchors.right: parent.right
-                    text: Model.chatTimestamp(chatRowItem.modelData.lastTs)
-                    color: Util.alpha(root.contentForeground, 0.5)
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.caption
+                  Column {
+                    spacing: Style.space(2)
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                      id: stampText
+                      anchors.right: parent.right
+                      text: Model.chatTimestamp(chatRowItem.modelData.lastTs)
+                      color: Util.alpha(root.contentForeground, 0.5)
+                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Rectangle {
+                      id: badgeRect
+                      anchors.right: parent.right
+                      readonly property int uCount: Number(chatRowItem.modelData.count !== undefined ? chatRowItem.modelData.count : (chatRowItem.modelData.unread || 0))
+                      visible: badgeRect.uCount > 0
+                      implicitWidth: badgeLabel.implicitWidth + Style.space(8)
+                      implicitHeight: badgeLabel.implicitHeight + Style.space(2)
+                      radius: height / 2
+                      color: root.accentColor
+
+                      Text {
+                        id: badgeLabel
+                        anchors.centerIn: parent
+                        text: Model.badgeText(badgeRect.uCount)
+                        color: Color.background
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
+                    }
                   }
 
                   Rectangle {
-                    id: badgeRect
-                    anchors.right: parent.right
+                    id: rowMarkReadBtn
                     readonly property int uCount: Number(chatRowItem.modelData.count !== undefined ? chatRowItem.modelData.count : (chatRowItem.modelData.unread || 0))
-                    visible: badgeRect.uCount > 0
-                    implicitWidth: badgeLabel.implicitWidth + Style.space(8)
-                    implicitHeight: badgeLabel.implicitHeight + Style.space(2)
-                    radius: height / 2
-                    color: root.accentColor
+                    visible: rowMarkReadBtn.uCount > 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(24)
+                    height: Style.space(24)
+                    radius: Style.space(12)
+                    color: rowMarkMouse.containsMouse ? Util.alpha(root.contentForeground, 0.12) : "transparent"
 
                     Text {
-                      id: badgeLabel
                       anchors.centerIn: parent
-                      text: Model.badgeText(badgeRect.uCount)
-                      color: Color.background
+                      text: root.iconMarkRead
+                      color: rowMarkMouse.containsMouse ? root.accentColor : Util.alpha(root.contentForeground, 0.6)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.caption
-                      font.bold: true
+                      font.pixelSize: Style.font.small
+                    }
+
+                    MouseArea {
+                      id: rowMarkMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: function (mouse) {
+                        mouse.accepted = true
+                        root.markSeen(chatRowItem.modelData.jid, chatRowItem.modelData.lastTs)
+                      }
                     }
                   }
                 }
