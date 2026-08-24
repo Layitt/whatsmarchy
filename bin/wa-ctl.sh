@@ -239,6 +239,14 @@ cmd_mark_seen() {
   emit_ok --argjson done true
 }
 
+cmd_mark_seen_all() {
+  local now cfg
+  now="$(date +%s)"
+  cfg="$(read_config | jq -c --argjson n "$now" '.seenAll = $n | .seen = {}')" || emit_error "could not update config"
+  write_config "$cfg" || emit_error "cannot write $(config_path)"
+  emit_ok --argjson done true
+}
+
 # ---------------------------------------------------------------------------
 # send — quick text reply. Always a human typing into the panel and pressing
 # send; this plugin has no autonomous or scheduled send path of any kind.
@@ -1146,6 +1154,8 @@ case "${1-}" in
   set-mode)        assert_config_safe; shift; cmd_set_mode "$@" ;;
   set-allow)       assert_config_safe; shift; cmd_set_allow "$@" ;;
   mark-seen)       shift; cmd_mark_seen "$@" ;;
+  mark-all-seen)   shift; cmd_mark_seen_all "$@" ;;
+  mark-seen-all)   shift; cmd_mark_seen_all "$@" ;;
   send)            shift; cmd_send "$@" ;;
   react)           shift; cmd_react "$@" ;;
   presence)        shift; cmd_presence "$@" ;;

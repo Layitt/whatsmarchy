@@ -606,21 +606,30 @@ Panel {
       root.markReadPending = Math.max(0, root.markReadPending - 1)
       if (typeof onDone === "function") onDone()
     }
-    // Optimistic UI: clear badges immediately
+    // Optimistic UI: clear badges immediately across all lists
     for (var i = 0; i < root.chats.length; i++) {
       if (root.chats[i].jid === jid) { root.chats[i].unread = 0; root.chats[i].count = 0 }
     }
     for (var j = 0; j < root.allChats.length; j++) {
       if (root.allChats[j].jid === jid) { root.allChats[j].unread = 0; root.allChats[j].count = 0 }
     }
+    for (var a = 0; a < root.allChatsList.length; a++) {
+      if (root.allChatsList[a].jid === jid) { root.allChatsList[a].unread = 0; root.allChatsList[a].count = 0 }
+    }
     var effectiveTs = ts
+    if (!effectiveTs && root.activeChat && root.activeChat.jid === jid) {
+      effectiveTs = root.activeChat.lastTs
+    }
+    if (!effectiveTs && root.messages && root.messages.length > 0) {
+      effectiveTs = root.messages[root.messages.length - 1].ts
+    }
     if (!effectiveTs) {
       for (var k = 0; k < root.chats.length; k++) {
         if (root.chats[k].jid === jid) { effectiveTs = root.chats[k].lastTs; break }
       }
     }
     if (!effectiveTs) effectiveTs = Math.round(Date.now() / 1000)
-    runAction(["mark-seen", String(jid), String(effectiveTs)], function (p) {
+    runAction(["mark-seen", String(jid), String(effectiveTs), "0"], function (p) {
       if (p && p.ok === true && root.hostWidget) root.hostWidget.refresh()
       done()
     })
@@ -634,6 +643,9 @@ Panel {
     for (var j = 0; j < root.allChats.length; j++) {
       if (root.allChats[j].jid === jid) { root.allChats[j].unread = 0; root.allChats[j].count = 0 }
     }
+    for (var a = 0; a < root.allChatsList.length; a++) {
+      if (root.allChatsList[a].jid === jid) { root.allChatsList[a].unread = 0; root.allChatsList[a].count = 0 }
+    }
     var ts = 0
     for (var k = 0; k < root.chats.length; k++) {
       if (root.chats[k].jid === jid) { ts = root.chats[k].lastTs; break }
@@ -644,24 +656,25 @@ Panel {
     })
   }
 
-  property var _markAllQueue: []
-
   function markAllSeen() {
-    if (root.chats.length === 0) return
-    var list = []
+    root.markReadPending++
     for (var i = 0; i < root.chats.length; i++) {
-      list.push({ jid: root.chats[i].jid, ts: root.chats[i].lastTs })
+      root.chats[i].unread = 0
+      root.chats[i].count = 0
     }
-    root._markAllQueue = list
-    _markAllStep()
-  }
+    for (var j = 0; j < root.allChats.length; j++) {
+      root.allChats[j].unread = 0
+      root.allChats[j].count = 0
+    }
+    for (var a = 0; a < root.allChatsList.length; a++) {
+      root.allChatsList[a].unread = 0
+      root.allChatsList[a].count = 0
+    }
 
-  function _markAllStep() {
-    if (root._markAllQueue.length === 0) return
-    var q = root._markAllQueue.slice()
-    var item = q.shift()
-    root._markAllQueue = q
-    root.markSeen(item.jid, item.ts, root._markAllStep)
+    runAction(["mark-all-seen"], function (p) {
+      root.markReadPending = Math.max(0, root.markReadPending - 1)
+      if (p && p.ok === true && root.hostWidget) root.hostWidget.refresh()
+    })
   }
 
   function openWebApp() { runAction(["webapp"], null) }
@@ -1375,11 +1388,14 @@ Panel {
               foreground: root.contentForeground
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
               fontSize: Style.font.icon
-              visible: root.view === "chat" || root.totalNew > 0
+              visible: root.view === "chat" || root.totalNew > 0 || (root.chats && root.chats.length > 0)
               enabled: !root.markReadBusy
               onClicked: {
                 if (root.view === "chat" && root.activeJid) {
-                  root.markSeen(root.activeJid, root.activeChat ? root.activeChat.lastTs : 0)
+                  var lastTs = (root.activeChat && root.activeChat.lastTs)
+                    ? root.activeChat.lastTs
+                    : (root.messages && root.messages.length > 0 ? root.messages[root.messages.length - 1].ts : 0)
+                  root.markSeen(root.activeJid, lastTs)
                 } else {
                   root.markAllSeen()
                 }
