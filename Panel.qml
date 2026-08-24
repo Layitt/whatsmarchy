@@ -1433,14 +1433,19 @@ Panel {
             PanelActionButton {
               id: refreshBtn
               iconText: root.iconRefresh
-              tooltipText: root.view === "chat" ? "Actualizar conversación" : "Actualizar chats"
+              tooltipText: root.view === "chat" ? "Actualizar conversación y foto" : "Actualizar chats y fotos"
               foreground: root.contentForeground
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
               fontSize: Style.font.icon
               onClicked: {
-                if (root.view === "chat" && root.activeJid) root.loadChatMessages(root.activeJid, root.chatSearchQuery)
-                else if (root.currentTab === "all") root.fetchAllChats()
-                else if (root.hostWidget) root.hostWidget.refresh()
+                root.reloadAvatars()
+                if (root.view === "chat" && root.activeJid) {
+                  root.loadChatMessages(root.activeJid, root.chatSearchQuery)
+                } else if (root.currentTab === "all") {
+                  root.fetchAllChats()
+                } else if (root.hostWidget) {
+                  root.hostWidget.refresh()
+                }
               }
 
               RotationAnimator {
@@ -1448,7 +1453,7 @@ Panel {
                 from: 0; to: 360
                 duration: 700
                 loops: Animation.Infinite
-                running: root.fetching || root.fetchingAllChats || (root.loadingHistoryJid !== "")
+                running: root.fetching || root.fetchingAllChats || root.syncingAvatars || (root.loadingHistoryJid !== "")
               }
             }
 
