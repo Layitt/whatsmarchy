@@ -90,9 +90,9 @@ MIN_TS="$(printf '%s' "$CONFIG" | jq -r '[.seenAll] + ([.seen[]] // []) | min | 
 is_uint "$MIN_TS" || MIN_TS="$SEEN_ALL"
 
 if [[ "$INCLUDE_CHANNELS" == "1" ]]; then
-  KIND_FILTER="'dm','group','newsletter'"
+  KIND_FILTER="'dm','group','newsletter','unknown'"
 else
-  KIND_FILTER="'dm','group'"
+  KIND_FILTER="'dm','group','unknown'"
 fi
 
 # MIN_TS / SCAN_LIMIT / PREVIEW_LIMIT are the only interpolated values and each

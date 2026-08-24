@@ -844,7 +844,7 @@ cmd_all_chats() {
       )
       LEFT JOIN contacts mct ON mct.jid = m.sender_jid
       WHERE c.jid <> 'status@broadcast'
-        AND c.kind IN ('dm', 'group', 'newsletter')
+        AND c.kind IN ('dm', 'group', 'newsletter', 'unknown')
         AND (
           :query = ''
           OR c.jid LIKE :query
@@ -889,12 +889,23 @@ cmd_chat_messages() {
   esc_search="${pattern//\'/\'\'}"
   esc_jid="${jid//\'/\'\'}"
 
-  rows="$( { printf ".parameter set :jid '%s'\n" "$esc_jid"
+  local session_db="$store/session.db"
+  local attach_cmd=""
+  local lid_union=""
+  if [[ -r "$session_db" ]]; then
+    local esc_session="${session_db//\'/\'\'}"
+    attach_cmd="ATTACH DATABASE '$esc_session' AS session;"
+    lid_union="UNION SELECT replace(l.lid, '''', '') || '@lid' AS jid FROM session.whatsmeow_lid_map l WHERE replace(l.pn, '''', '') = replace(replace(:jid, '@s.whatsapp.net', ''), '@lid', '') OR replace(l.pn, '''', '') || '@s.whatsapp.net' = :jid UNION SELECT replace(l.pn, '''', '') || '@s.whatsapp.net' AS jid FROM session.whatsmeow_lid_map l WHERE replace(l.lid, '''', '') = replace(replace(:jid, '@s.whatsapp.net', ''), '@lid', '') OR replace(l.lid, '''', '') || '@lid' = :jid"
+  fi
+
+  rows="$( { [[ -n "$attach_cmd" ]] && printf "%s\n" "$attach_cmd"
+            printf ".parameter set :jid '%s'\n" "$esc_jid"
             printf ".parameter set :lim %d\n" "$limit"
             printf ".parameter set :search '%s'\n" "$esc_search"
-            cat <<'SQL'
+            cat <<SQL
     WITH target_jids AS (
       SELECT :jid AS jid
+      $lid_union
       UNION
       SELECT c2.jid FROM chats c1 JOIN chats c2 ON c1.name = c2.name WHERE c1.jid = :jid AND c1.name IS NOT NULL AND c1.name != ''
       UNION
