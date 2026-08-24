@@ -274,7 +274,14 @@ cmd_send() {
   if (( $? != 0 )); then
     emit_error "send failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
-  emit_ok --argjson sent true
+  local msg_id msg_ts
+  msg_id="$(printf '%s' "$out" | jq -r '.data.id // empty' 2>/dev/null || true)"
+  msg_ts="$(printf '%s' "$out" | jq -r '.data.ts // empty' 2>/dev/null || true)"
+  if [[ -n "$msg_id" ]]; then
+    emit_ok --argjson sent true --arg id "$msg_id" --arg ts "$msg_ts"
+  else
+    emit_ok --argjson sent true
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -320,7 +327,14 @@ cmd_send_file() {
   if (( rc != 0 )); then
     emit_error "send file failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
-  emit_ok --argjson sent true
+  local msg_id msg_ts
+  msg_id="$(printf '%s' "$out" | jq -r '.data.id // empty' 2>/dev/null || true)"
+  msg_ts="$(printf '%s' "$out" | jq -r '.data.ts // empty' 2>/dev/null || true)"
+  if [[ -n "$msg_id" ]]; then
+    emit_ok --argjson sent true --arg id "$msg_id" --arg ts "$msg_ts"
+  else
+    emit_ok --argjson sent true
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -580,7 +594,14 @@ cmd_voice_send() {
     emit_error "send failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
   rm -f -- "$staged"
-  emit_ok --argjson sent true
+  local msg_id msg_ts
+  msg_id="$(printf '%s' "$out" | jq -r '.data.id // empty' 2>/dev/null || true)"
+  msg_ts="$(printf '%s' "$out" | jq -r '.data.ts // empty' 2>/dev/null || true)"
+  if [[ -n "$msg_id" ]]; then
+    emit_ok --argjson sent true --arg id "$msg_id" --arg ts "$msg_ts"
+  else
+    emit_ok --argjson sent true
+  fi
 }
 
 cmd_voice_discard() {

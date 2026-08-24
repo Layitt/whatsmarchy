@@ -397,6 +397,22 @@ Panel {
           }
         } else {
           root.actionError = ""
+          if (tempId && payload.id) {
+            var realId = String(payload.id)
+            var updateMsgId = function(list) {
+              var res = []
+              for (var i = 0; i < (list || []).length; i++) {
+                var m = list[i]
+                if (m && m.id === tempId) res.push(Object.assign({}, m, { id: realId }))
+                else res.push(m)
+              }
+              return res
+            }
+            if (root.activeJid === jobJid) root.messages = updateMsgId(root.messages)
+            if (root.chatHistoryMap[jobJid]) {
+              root.chatHistoryMap = root.withEntry(root.chatHistoryMap, jobJid, updateMsgId(root.chatHistoryMap[jobJid]))
+            }
+          }
           root.replySent(jobJid)
           root.autoMarkSeenAfterSend(jobJid)
           root.loadChatMessages(jobJid, root.chatSearchQuery)
@@ -464,17 +480,51 @@ Panel {
 
   Process {
     id: fileSendProc
+    property string targetJid: ""
+    property string tempId: ""
     running: false
     stdout: StdioCollector {
       onStreamFinished: {
         var payload = null
         try { payload = JSON.parse(this.text) } catch (e) { payload = null }
+        var targetJid = fileSendProc.targetJid || root.activeJid
+        var tempId = fileSendProc.tempId
         if (!payload || payload.ok !== true) {
           root.actionError = String((payload && payload.error) || "error al enviar archivo")
+          if (tempId) {
+            var markFailed = function(list) {
+              var res = []
+              for (var i = 0; i < (list || []).length; i++) {
+                var m = list[i]
+                if (m && m.id === tempId) res.push(Object.assign({}, m, { isFailed: true }))
+                else res.push(m)
+              }
+              return res
+            }
+            if (root.activeJid === targetJid) root.messages = markFailed(root.messages)
+            if (root.chatHistoryMap[targetJid]) {
+              root.chatHistoryMap = root.withEntry(root.chatHistoryMap, targetJid, markFailed(root.chatHistoryMap[targetJid]))
+            }
+          }
           return
         }
         root.actionError = ""
-        var targetJid = root.activeJid
+        if (tempId && payload.id) {
+          var realId = String(payload.id)
+          var updateMsgId = function(list) {
+            var res = []
+            for (var i = 0; i < (list || []).length; i++) {
+              var m = list[i]
+              if (m && m.id === tempId) res.push(Object.assign({}, m, { id: realId }))
+              else res.push(m)
+            }
+            return res
+          }
+          if (root.activeJid === targetJid) root.messages = updateMsgId(root.messages)
+          if (root.chatHistoryMap[targetJid]) {
+            root.chatHistoryMap = root.withEntry(root.chatHistoryMap, targetJid, updateMsgId(root.chatHistoryMap[targetJid]))
+          }
+        }
         root.selectedFile = null
         root.fileCaption = ""
         if (targetJid) {
@@ -581,6 +631,8 @@ Panel {
     root.updateChatListSnippet(root.activeJid, fileLabel, "me", tempFileMsg.ts)
     Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
 
+    fileSendProc.targetJid = root.activeJid
+    fileSendProc.tempId = tempFileMsg.id
     fileSendProc.command = [root.ctlScript, "send-file", root.activeJid, root.selectedFile.path, root.fileCaption]
     fileSendProc.running = true
   }
@@ -874,14 +926,33 @@ Panel {
 
   Process {
     id: voiceSendProc
+    property string targetJid: ""
+    property string tempId: ""
     running: false
     stdout: StdioCollector {
       onStreamFinished: {
         var payload = null
         try { payload = JSON.parse(this.text) } catch (e) { payload = null }
         var abandoned = root.voiceAbandonOnSend
+        var targetJid = voiceSendProc.targetJid || root.voiceJid
+        var tempId = voiceSendProc.tempId
         if (!payload || payload.ok !== true) {
           root.actionError = String((payload && payload.error) || "voice note send failed")
+          if (tempId) {
+            var markFailed = function(list) {
+              var res = []
+              for (var i = 0; i < (list || []).length; i++) {
+                var m = list[i]
+                if (m && m.id === tempId) res.push(Object.assign({}, m, { isFailed: true }))
+                else res.push(m)
+              }
+              return res
+            }
+            if (root.activeJid === targetJid) root.messages = markFailed(root.messages)
+            if (root.chatHistoryMap[targetJid]) {
+              root.chatHistoryMap = root.withEntry(root.chatHistoryMap, targetJid, markFailed(root.chatHistoryMap[targetJid]))
+            }
+          }
           if (abandoned) {
             if (root.voiceToken !== "") root.discardRecording(root.voiceToken)
             root.resetVoice()
@@ -892,8 +963,24 @@ Panel {
           return
         }
         root.actionError = ""
-        var sentVoiceJid = root.voiceJid
+        var sentVoiceJid = targetJid || root.voiceJid
         root.resetVoice()
+        if (tempId && payload.id) {
+          var realId = String(payload.id)
+          var updateMsgId = function(list) {
+            var res = []
+            for (var i = 0; i < (list || []).length; i++) {
+              var m = list[i]
+              if (m && m.id === tempId) res.push(Object.assign({}, m, { id: realId }))
+              else res.push(m)
+            }
+            return res
+          }
+          if (root.activeJid === sentVoiceJid) root.messages = updateMsgId(root.messages)
+          if (root.chatHistoryMap[sentVoiceJid]) {
+            root.chatHistoryMap = root.withEntry(root.chatHistoryMap, sentVoiceJid, updateMsgId(root.chatHistoryMap[sentVoiceJid]))
+          }
+        }
         if (sentVoiceJid !== "") {
           root.autoMarkSeenAfterSend(sentVoiceJid)
           root.loadChatMessages(sentVoiceJid, root.chatSearchQuery)
@@ -1028,6 +1115,8 @@ Panel {
     root.updateChatListSnippet(root.voiceJid, "🎤 Nota de voz", "me", tempVoiceMsg.ts)
 
     root.voiceState = "sending"
+    voiceSendProc.targetJid = root.voiceJid
+    voiceSendProc.tempId = tempVoiceMsg.id
     voiceSendProc.command = [root.ctlScript, "voice-send", root.voiceJid, root.voiceToken]
     voiceSendProc.running = true
   }
@@ -1209,35 +1298,40 @@ Panel {
             var curMsg = current[c]
             if (!curMsg) continue
             var isTemp = String(curMsg.id || "").indexOf("temp_") === 0
-            if (!isTemp) continue
 
-            // Check if this temp message has already synced and appeared in incoming
+            // Check if this message is already present in incoming
             var matched = false
             for (var k = 0; k < incoming.length; k++) {
               var incMsg = incoming[k]
-              if (!incMsg || !incMsg.fromMe) continue
-              if (incMsg.id === curMsg.id) { matched = true; break }
-              // Match text messages
-              var curText = String(curMsg.text || "").trim()
-              var incText = String(incMsg.text || "").trim()
-              if (curText !== "" && incText === curText && Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 300) {
+              if (!incMsg) continue
+              // Exact ID match (covers synced messages with real WhatsApp ID)
+              if (curMsg.id && incMsg.id && curMsg.id === incMsg.id) {
                 matched = true
                 break
               }
-              // Match media / attachments
-              if (curMsg.hasMedia && incMsg.hasMedia) {
-                if ((curMsg.filename && incMsg.filename === curMsg.filename) || (curMsg.mediaType && incMsg.mediaType === curMsg.mediaType)) {
-                  if (Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 300) {
+              // For temp optimistic messages, match only forward in time (-5s to +35s slack)
+              if (isTemp && incMsg.fromMe) {
+                var tsDiff = (incMsg.ts || 0) - (curMsg.ts || 0)
+                if (tsDiff >= -5 && tsDiff <= 35) {
+                  var curText = String(curMsg.text || "").trim()
+                  var incText = String(incMsg.text || "").trim()
+                  if (curText !== "" && incText === curText) {
                     matched = true
                     break
+                  }
+                  if (curMsg.hasMedia && incMsg.hasMedia) {
+                    if ((curMsg.filename && incMsg.filename === curMsg.filename) || (curMsg.mediaType && incMsg.mediaType === curMsg.mediaType)) {
+                      matched = true
+                      break
+                    }
                   }
                 }
               }
             }
 
             if (!matched) {
-              // Retain pending message if it was created within the last 5 minutes
-              if (nowSec - (curMsg.ts || 0) < 300) {
+              // Retain in-flight / recent sent messages if created within the last 3 minutes
+              if (curMsg.fromMe && (nowSec - (curMsg.ts || 0) < 180)) {
                 pending.push(curMsg)
               }
             }
