@@ -283,3 +283,58 @@ function avatarInitials(name, kind) {
   var c = n.charAt(0).toUpperCase()
   return /[A-Z0-9]/i.test(c) ? c : (kind === "group" ? "👥" : "👤")
 }
+
+function isContactOnline(chat, messages) {
+  if (!chat) return false
+  if (chat.kind === "group" || chat.kind === "newsletter") return false
+  var nowSec = Math.floor(Date.now() / 1000)
+  if (messages && messages.length > 0) {
+    for (var i = messages.length - 1; i >= 0; i--) {
+      var m = messages[i]
+      if (m && !m.fromMe && m.timestamp) {
+        var diff = nowSec - m.timestamp
+        if (diff >= 0 && diff < 300) return true
+        break
+      }
+    }
+  }
+  var ts = chat.lastMessageTs || chat.lastTs || (chat.messages && chat.messages.length > 0 ? chat.messages[chat.messages.length - 1].timestamp : 0)
+  if (ts && !chat.lastFromMe) {
+    var cDiff = nowSec - ts
+    if (cDiff >= 0 && cDiff < 300) return true
+  }
+  return false
+}
+
+function contactStatusText(chat, messages) {
+  if (!chat) return ""
+  if (chat.kind === "group") return "Grupo"
+  if (chat.kind === "newsletter") return "Canal"
+  var nowSec = Math.floor(Date.now() / 1000)
+  var lastIncomingTs = 0
+  if (messages && messages.length > 0) {
+    for (var i = messages.length - 1; i >= 0; i--) {
+      var m = messages[i]
+      if (m && !m.fromMe && m.timestamp) {
+        lastIncomingTs = m.timestamp
+        break
+      }
+    }
+  }
+  if (!lastIncomingTs) {
+    var ts = chat.lastMessageTs || chat.lastTs || (chat.messages && chat.messages.length > 0 ? chat.messages[chat.messages.length - 1].timestamp : 0)
+    if (ts && !chat.lastFromMe) lastIncomingTs = ts
+  }
+  if (lastIncomingTs > 0) {
+    var diff = nowSec - lastIncomingTs
+    if (diff >= 0 && diff < 300) return "En línea"
+    if (diff >= 0 && diff < 3600) return "Activo hace " + Math.max(1, Math.floor(diff / 60)) + " min"
+    var d = new Date(lastIncomingTs * 1000)
+    var today = startOfDay(new Date())
+    var msgDay = startOfDay(d)
+    if (msgDay === today) return "Últ. vez hoy a las " + Qt.formatTime(d, "HH:mm")
+    if (msgDay === today - 86400000) return "Últ. vez ayer a las " + Qt.formatTime(d, "HH:mm")
+    return "Últ. vez " + Qt.formatDateTime(d, "d MMM HH:mm")
+  }
+  return "Chat directo"
+}

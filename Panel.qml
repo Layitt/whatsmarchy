@@ -1115,12 +1115,7 @@ Panel {
               anchors.fill: parent
               visible: false
               source: headerAvatar.headAvPath !== "" ? root.fileUrl(headerAvatar.headAvPath) : ""
-              fillMode: Image.PreserveAspectCrop
-              asynchronous: true
-              cache: true
-            }
-
-            MultiEffect {
+                MultiEffect {
               id: headAvatarEffect
               anchors.fill: parent
               source: headAvatarImg
@@ -1129,6 +1124,19 @@ Panel {
               maskSource: headMask
               maskThresholdMin: 0.5
               maskSpreadAtMin: 0.02
+            }
+
+            Rectangle {
+              id: headOnlineDot
+              width: Style.space(8)
+              height: Style.space(8)
+              radius: width / 2
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              color: "#25d366"
+              border.color: Color.background
+              border.width: 1.5
+              visible: Model.isContactOnline(root.activeChat, root.messages)
             }
           }
 
@@ -1161,12 +1169,7 @@ Panel {
               text: {
                 if (root.view === "chat") {
                   if (root.loadingHistoryJid === root.activeJid) return "cargando mensajes…"
-                  if (root.activeChat) {
-                    if (root.activeChat.kind === "group") return "Grupo"
-                    if (root.activeChat.kind === "newsletter") return "Canal"
-                    return "Chat directo"
-                  }
-                  return ""
+                  return Model.contactStatusText(root.activeChat, root.messages)
                 }
                 if (!root.everLoaded) return "cargando…"
                 if (root.errorText !== "") return "no disponible"
@@ -1178,10 +1181,19 @@ Panel {
                 }
                 return "todos los chats"
               }
-              color: (root.totalNew > 0 && root.view === "chats" && root.currentTab === "unread")
-                ? root.accentColor
-                : Util.alpha(root.contentForeground, 0.6)
+              color: {
+                if (root.view === "chat") {
+                  return Model.isContactOnline(root.activeChat, root.messages)
+                    ? "#25d366"
+                    : Util.alpha(root.contentForeground, 0.6)
+                }
+                return (root.totalNew > 0 && root.view === "chats" && root.currentTab === "unread")
+                  ? root.accentColor
+                  : Util.alpha(root.contentForeground, 0.6)
+              }
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+            }font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
@@ -1835,6 +1847,18 @@ Panel {
                     maskSource: rowMask
                     maskThresholdMin: 0.5
                     maskSpreadAtMin: 0.02
+                  }
+
+                  Rectangle {
+                    width: Style.space(9)
+                    height: Style.space(9)
+                    radius: width / 2
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    color: "#25d366"
+                    border.color: Color.background
+                    border.width: 1.5
+                    visible: Model.isContactOnline(chatRowItem.modelData)
                   }
                 }
 
