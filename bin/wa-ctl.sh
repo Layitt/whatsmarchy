@@ -225,7 +225,7 @@ mark_read_remote() {
 # a stale panel payload replaying an old timestamp must not resurrect messages
 # the user already dismissed.
 cmd_mark_seen() {
-  local jid="${1-}" ts="${2-}" cfg now
+  local jid="${1-}" ts="${2-}" remote="${3:-1}" cfg now
   is_jid "$jid" || emit_error "invalid chat id"
   is_uint "$ts" || emit_error "invalid timestamp"
   now="$(date +%s)"
@@ -233,7 +233,9 @@ cmd_mark_seen() {
   cfg="$(read_config | jq -c --slurpfile j <(json_arg "$(json_string "$jid")") --argjson t "$ts" \
     '.seen[$j[0]] = ([(.seen[$j[0]] // 0), $t] | max)')" || emit_error "could not update config"
   write_config "$cfg" || emit_error "cannot write $(config_path)"
-  ( printf '%s\n' "$jid" | mark_read_remote ) >/dev/null 2>&1 &
+  if [[ "$remote" != "0" ]]; then
+    ( printf '%s\n' "$jid" | mark_read_remote ) >/dev/null 2>&1 &
+  fi
   emit_ok --argjson done true
 }
 
@@ -260,7 +262,7 @@ cmd_send() {
     fi
   fi
 
-  out="$(wacli send text --to "$jid" --message "$msg" "${extra_flags[@]}" --post-send-wait 0 --lock-wait 5s --json 2>&1)"
+  out="$(wacli send text --to "$jid" --message "$msg" "${extra_flags[@]}" --post-send-wait 0 --lock-wait 3s --no-preview --json 2>&1)"
   if (( $? != 0 )); then
     emit_error "send failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
@@ -299,7 +301,7 @@ cmd_send_file() {
   [[ -f "$path" && -r "$path" ]] || emit_error "file not found or not readable"
   require_cmd wacli
 
-  local flags=(send file --to "$jid" --file "$path" --post-send-wait 0 --lock-wait 5s --json)
+  local flags=(send file --to "$jid" --file "$path" --post-send-wait 0 --lock-wait 3s --json)
   if [[ -n "$caption" ]]; then
     (( ${#caption} <= 8000 )) || emit_error "caption too long"
     flags+=(--caption "$caption")
@@ -560,7 +562,7 @@ cmd_voice_send() {
   # Unlike a reply body, the arguments here are a path this plugin generated and
   # a JID the panel already puts on this script's own command line, so nothing
   # new is exposed in `ps` by passing them.
-  out="$(wacli send voice --to "$jid" --file "$staged" --post-send-wait 0 --lock-wait 5s --json 2>&1)"
+  out="$(wacli send voice --to "$jid" --file "$staged" --post-send-wait 0 --lock-wait 3s --json 2>&1)"
   rc=$?
   if (( rc != 0 )); then
     # Moved back under the name the panel knows, so Send can be pressed again.
@@ -623,7 +625,7 @@ resolve_media_path() {
   local jid="$1" msg_id="$2"
   RESOLVED_MEDIA=""
   require_cmd sqlite3
-  local store db row local_path mime target out
+  local store db row local_path mime target out actual_chat_jid tmp dl_chat size real_store real_file
   store="$(resolve_store_dir)" || emit_error "wacli store not found"
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
@@ -666,7 +668,6 @@ SQL
   # path outside the store would mean handing an arbitrary file to a media
   # player on a click.
   if [[ -n "$local_path" && -f "$local_path" ]]; then
-    local real_store real_file
     real_store="$(realpath -e -- "$store" 2>/dev/null)"
     real_file="$(realpath -e -- "$local_path" 2>/dev/null)"
     if [[ -n "$real_store" && -n "$real_file" && "$real_file" == "$real_store"/* ]]; then
@@ -690,8 +691,8 @@ SQL
   # kill — leaves a truncated file that the `[[ -s ]]` check above then serves
   # forever as a valid attachment. The rename is atomic, so two callers racing
   # on the same message cannot see a half-written file either.
-  local tmp dl_chat
   dl_chat="${actual_chat_jid:-$jid}"
+  is_jid "$dl_chat" || emit_error "invalid chat id for media download"
   tmp="$(mktemp "$MEDIA_CACHE/.dl.XXXXXX")" || emit_error "cannot create a download temp file"
   chmod 600 -- "$tmp" 2>/dev/null
   trap 'rm -f -- "$tmp"' RETURN

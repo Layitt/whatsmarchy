@@ -356,7 +356,7 @@ Panel {
         root.replySent(sendProc.jid)
         root.autoMarkSeenAfterSend(sendProc.jid)
         root.loadChatMessages(sendProc.jid, root.chatSearchQuery)
-        reloadChatTimer.restart()
+        root.scheduleChatReload(sendProc.jid)
       }
     }
   }
@@ -434,18 +434,38 @@ Panel {
         if (targetJid) {
           root.autoMarkSeenAfterSend(targetJid)
           root.loadChatMessages(targetJid, root.chatSearchQuery)
-          reloadChatTimer.restart()
+          root.scheduleChatReload(targetJid)
         }
       }
     }
   }
 
+  property int reloadChatRetries: 0
+  property string reloadChatJid: ""
+
+  function scheduleChatReload(jid) {
+    var target = String(jid || root.activeJid || "")
+    if (!target) return
+    root.reloadChatJid = target
+    root.reloadChatRetries = 4
+    reloadChatTimer.interval = 1000
+    reloadChatTimer.restart()
+  }
+
   Timer {
     id: reloadChatTimer
-    interval: 150
+    interval: 1000
     repeat: false
     onTriggered: {
-      if (root.activeJid) root.loadChatMessages(root.activeJid, root.chatSearchQuery)
+      var target = root.reloadChatJid || root.activeJid
+      if (target) {
+        root.loadChatMessages(target, root.chatSearchQuery)
+        if (root.reloadChatRetries > 0) {
+          root.reloadChatRetries--
+          reloadChatTimer.interval = 1800
+          reloadChatTimer.restart()
+        }
+      }
     }
   }
 
@@ -567,11 +587,20 @@ Panel {
 
   function autoMarkSeenAfterSend(jid) {
     if (!jid) return
-    var ts = 0
     for (var i = 0; i < root.chats.length; i++) {
-      if (root.chats[i].jid === jid) { ts = root.chats[i].lastTs; break }
+      if (root.chats[i].jid === jid) { root.chats[i].unread = 0; root.chats[i].count = 0 }
     }
-    if (ts > 0) root.markSeen(jid, ts, null)
+    for (var j = 0; j < root.allChats.length; j++) {
+      if (root.allChats[j].jid === jid) { root.allChats[j].unread = 0; root.allChats[j].count = 0 }
+    }
+    var ts = 0
+    for (var k = 0; k < root.chats.length; k++) {
+      if (root.chats[k].jid === jid) { ts = root.chats[k].lastTs; break }
+    }
+    if (!ts) ts = Math.round(Date.now() / 1000)
+    runAction(["mark-seen", String(jid), String(ts), "0"], function (p) {
+      if (p && p.ok === true && root.hostWidget) root.hostWidget.refresh()
+    })
   }
 
   property var _markAllQueue: []
@@ -617,6 +646,8 @@ Panel {
     if (!composer) return
     var text = String(composer.text || "").trim()
     if (!text || !root.activeJid) return
+    if (typingTimer.running) typingTimer.stop()
+    root.sendPresence(root.activeJid, "paused")
     var rId = root.replyingTo ? root.replyingTo.id : ""
     var rSender = root.replyingTo ? root.replyingTo.senderJid : ""
     var rQuoted = root.replyingTo
@@ -767,6 +798,7 @@ Panel {
         if (sentVoiceJid !== "") {
           root.autoMarkSeenAfterSend(sentVoiceJid)
           root.loadChatMessages(sentVoiceJid, root.chatSearchQuery)
+          root.scheduleChatReload(sentVoiceJid)
         }
       }
     }
@@ -1020,15 +1052,60 @@ Panel {
         try { payload = JSON.parse(this.text) } catch (e) { payload = null }
         if (payload && payload.ok === true && Array.isArray(payload.messages)) {
           var targetJid = String(payload.jid || messagesProc.jid)
-          root.chatHistoryMap = root.withEntry(root.chatHistoryMap, targetJid, payload.messages)
+          var incoming = payload.messages
+          var current = (root.activeJid === targetJid && root.messages && root.messages.length > 0)
+            ? root.messages
+            : (root.chatHistoryMap[targetJid] || [])
+
+          // Preserve any in-flight temporary/optimistic messages not yet synced to SQLite
+          var pending = []
+          var nowSec = Math.floor(Date.now() / 1000)
+          for (var c = 0; c < current.length; c++) {
+            var curMsg = current[c]
+            if (!curMsg) continue
+            var isTemp = String(curMsg.id || "").indexOf("temp_") === 0
+            if (!isTemp) continue
+
+            // Check if this temp message has already synced and appeared in incoming
+            var matched = false
+            for (var k = 0; k < incoming.length; k++) {
+              var incMsg = incoming[k]
+              if (!incMsg || !incMsg.fromMe) continue
+              if (incMsg.id === curMsg.id) { matched = true; break }
+              // Match text messages
+              if (curMsg.text && incMsg.text === curMsg.text && Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 180) {
+                matched = true
+                break
+              }
+              // Match media / attachments
+              if (curMsg.hasMedia && incMsg.hasMedia) {
+                if ((curMsg.filename && incMsg.filename === curMsg.filename) || (curMsg.mediaType && incMsg.mediaType === curMsg.mediaType)) {
+                  if (Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 180) {
+                    matched = true
+                    break
+                  }
+                }
+              }
+            }
+
+            if (!matched) {
+              // Retain pending message if it was created within the last 3 minutes
+              if (nowSec - (curMsg.ts || 0) < 180) {
+                pending.push(curMsg)
+              }
+            }
+          }
+
+          var merged = incoming.concat(pending)
+          root.chatHistoryMap = root.withEntry(root.chatHistoryMap, targetJid, merged)
           if (root.activeJid === targetJid) {
-            root.messages = payload.messages
+            root.messages = merged
             Qt.callLater(function() {
               if (messageList) messageList.positionViewAtEnd()
             })
           }
-          for (var i = 0; i < payload.messages.length; i++) {
-            var msg = payload.messages[i]
+          for (var i = 0; i < incoming.length; i++) {
+            var msg = incoming[i]
             if (String(msg.mediaType) === "image" || String(msg.mediaType) === "sticker")
               root.queueThumb(targetJid, msg.id)
           }
