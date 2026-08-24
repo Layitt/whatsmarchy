@@ -1,4 +1,4 @@
-# WhatsMarchy 💬
+# Layitt WhatsMarchy Plus 💬
 
 > Fast, native WhatsApp desktop panel and bar widget for [Omarchy Linux](https://omarchy.org).
 
