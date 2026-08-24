@@ -4,7 +4,7 @@ WhatsApp in your [Omarchy](https://omarchy.org) bar & desktop shell.
 
 WhatsMarchy provides a rich, responsive desktop interface for WhatsApp powered by [`wacli`](https://github.com/openclaw/wacli). By default, the bar displays unread senders and message counts with zero distraction. Click to expand a complete WhatsApp conversation hub with instant replies, emoji reactions, voice note recording & playback, media attachment previews, in-chat search, and full chat list navigation.
 
-![Bar widget and panel](preview.png)
+![Bar widget and panel](screenshot.png)
 
 ---
 
