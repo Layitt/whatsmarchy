@@ -1115,7 +1115,12 @@ Panel {
               anchors.fill: parent
               visible: false
               source: headerAvatar.headAvPath !== "" ? root.fileUrl(headerAvatar.headAvPath) : ""
-                MultiEffect {
+              fillMode: Image.PreserveAspectCrop
+              asynchronous: true
+              cache: true
+            }
+
+            MultiEffect {
               id: headAvatarEffect
               anchors.fill: parent
               source: headAvatarImg
@@ -1192,8 +1197,6 @@ Panel {
                   : Util.alpha(root.contentForeground, 0.6)
               }
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-            }font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
