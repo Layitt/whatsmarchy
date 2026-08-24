@@ -252,8 +252,10 @@ cmd_send() {
 
   local extra_flags=()
   if [[ -n "$reply_to" ]]; then
+    is_msg_id "$reply_to" || emit_error "invalid reply message id"
     extra_flags+=(--reply-to "$reply_to")
     if [[ -n "$reply_sender" ]]; then
+      is_jid "$reply_sender" || emit_error "invalid reply sender id"
       extra_flags+=(--reply-to-sender "$reply_sender")
     fi
   fi
@@ -299,6 +301,7 @@ cmd_send_file() {
 
   local flags=(send file --to "$jid" --file "$path" --post-send-wait 0 --lock-wait 5s --json)
   if [[ -n "$caption" ]]; then
+    (( ${#caption} <= 8000 )) || emit_error "caption too long"
     flags+=(--caption "$caption")
   fi
 
@@ -764,7 +767,9 @@ cmd_open() {
   [[ -n "$path" && -s "$path" ]] || emit_error "attachment is not available locally"
   ext="$(printf '%s' "${path##*.}" | tr 'A-Z' 'a-z')"
   case "$ext" in
-    desktop | sh | bash | py | exe | appimage | run | com | bat | cmd | bin)
+    desktop | directory | sh | bash | zsh | fish | csh | ksh | command | \
+    py | pl | rb | php | js | cjs | mjs | exe | appimage | run | com | bat | \
+    cmd | bin | jar | service | timer | socket | deb | rpm | apk | pkg* | msi | vbs | ps1)
       emit_error "refusing to open executable file type ($ext) for security"
       ;;
   esac
@@ -875,9 +880,10 @@ cmd_chat_messages() {
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
 
-  local pattern="" esc_search esc_jid
-  if [[ -n "$search" ]]; then
-    pattern="%${search}%"
+  local clean_search pattern="" esc_search esc_jid
+  clean_search="$(printf '%s' "$search" | tr -cd '[:alnum:] @._-')"
+  if [[ -n "$clean_search" ]]; then
+    pattern="%${clean_search}%"
   fi
   esc_search="${pattern//\'/\'\'}"
   esc_jid="${jid//\'/\'\'}"
@@ -1063,11 +1069,13 @@ cmd_react() {
   is_msg_id "$msg_id" || emit_error "invalid message id"
   [[ -n "$emoji" ]] || emit_error "empty reaction emoji"
   [[ "$emoji" =~ ^- ]] && emit_error "invalid reaction emoji"
+  local flags=(send react --to "$jid" --id "$msg_id" --reaction "$emoji" --post-send-wait 0 --lock-wait 5s --json)
   if [[ -n "$sender" ]]; then
     is_jid "$sender" || emit_error "invalid sender id"
+    flags+=(--sender "$sender")
   fi
   require_cmd wacli
-  out="$(wacli send react --to "$jid" --id "$msg_id" --reaction "$emoji" ${sender:+--sender "$sender"} --post-send-wait 0 --lock-wait 5s --json 2>&1)"
+  out="$(wacli "${flags[@]}" 2>&1)"
   if (( $? != 0 )); then
     emit_error "react failed: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
@@ -1081,18 +1089,15 @@ cmd_presence() {
     typing | paused) ;;
     *) emit_error "invalid presence state: expected typing or paused" ;;
   esac
+  local flags=(presence "$state" --to "$jid" --lock-wait 2s --json)
   if [[ -n "$media" ]]; then
     case "$media" in
-      audio) ;;
+      audio) flags+=(--media "$media") ;;
       *) emit_error "invalid presence media: expected audio" ;;
     esac
   fi
   require_cmd wacli
-  if [[ "$state" == "typing" ]]; then
-    wacli presence typing --to "$jid" ${media:+--media "$media"} --lock-wait 2s --json >/dev/null 2>&1 &
-  else
-    wacli presence paused --to "$jid" --lock-wait 2s --json >/dev/null 2>&1 &
-  fi
+  wacli "${flags[@]}" >/dev/null 2>&1 &
   emit_ok --arg presence "$state"
 }
 
