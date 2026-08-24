@@ -96,7 +96,16 @@ rm -f ~/.config/systemd/user/whatsmarchy-sync.service
 
 ---
 
-## 📜 License
+## 📜 Credits & Attribution
+
+WhatsMarchy is an enhanced evolution and fork combining the best concepts and foundations from:
+- [**`boyoyooo/whatsmarchy`**](https://github.com/boyoyooo/whatsmarchy) by **@boyoyooo** — The original privacy-first WhatsApp notification and bar widget for Omarchy.
+- [**`ricky/whatsapp`**](https://github.com/ricky/whatsapp) by **@ricky** — The full chat exploration and conversation browsing concepts.
+- [**`wacli`**](https://github.com/openclaw/wacli) by **@openclaw** — The underlying WhatsApp multi-device command-line client and sync engine.
+
+---
+
+## 📄 License
 
 MIT License — see [LICENSE](LICENSE).
 
