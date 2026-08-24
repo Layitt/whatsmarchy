@@ -117,7 +117,14 @@ Panel {
     root.chatSearchQuery = ""
     root.replyingTo = null
     root.queueAvatar(jid)
-    root.messages = root.chatHistoryMap[jid] || chat.messages || []
+    var cached = root.chatHistoryMap[jid]
+    if (cached && cached.length > 0) {
+      root.messages = cached
+    } else if (chat.messages && chat.messages.length > 0) {
+      root.messages = chat.messages
+    } else {
+      root.messages = []
+    }
     root.loadChatMessages(jid)
     Qt.callLater(function () {
       if (root.selectedFile !== null && typeof captionInput !== "undefined" && captionInput) {
@@ -508,6 +515,40 @@ Panel {
     }
   }
 
+  function updateChatListSnippet(jid, snippetText, senderName, timestamp) {
+    if (!jid) return
+    var ts = timestamp || Math.floor(Date.now() / 1000)
+    var snd = senderName || "me"
+    var snip = snippetText || ""
+
+    var updateList = function(list) {
+      if (!Array.isArray(list)) return []
+      var updated = []
+      var found = null
+      for (var i = 0; i < list.length; i++) {
+        var item = list[i]
+        if (item && item.jid === jid) {
+          found = Object.assign({}, item, {
+            snippet: snip,
+            lastSender: snd,
+            lastTs: ts,
+            unread: 0,
+            count: 0
+          })
+        } else {
+          updated.push(item)
+        }
+      }
+      if (found) updated.unshift(found)
+      return updated
+    }
+
+    root.allChatsList = updateList(root.allChatsList)
+    if (root.hostWidget && Array.isArray(root.hostWidget.chats)) {
+      root.hostWidget.chats = updateList(root.hostWidget.chats)
+    }
+  }
+
   function sendFile() {
     if (!root.selectedFile || !root.selectedFile.path || fileSendProc.running) return
     if (!root.activeJid) return
@@ -536,6 +577,8 @@ Panel {
     var updated = root.messages.concat([tempFileMsg])
     root.messages = updated
     root.chatHistoryMap = root.withEntry(root.chatHistoryMap, root.activeJid, updated)
+    var fileLabel = root.fileCaption ? root.fileCaption : (root.selectedFile.name || "[Documento]")
+    root.updateChatListSnippet(root.activeJid, fileLabel, "me", tempFileMsg.ts)
     Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
 
     fileSendProc.command = [root.ctlScript, "send-file", root.activeJid, root.selectedFile.path, root.fileCaption]
@@ -728,6 +771,7 @@ Panel {
     var updated = root.messages.concat([tempMsg])
     root.messages = updated
     root.chatHistoryMap = root.withEntry(root.chatHistoryMap, root.activeJid, updated)
+    root.updateChatListSnippet(root.activeJid, text, "me", tempMsg.ts)
     Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
 
     root.sendReply(root.activeJid, text, rId, rSender, tempId)
@@ -981,6 +1025,7 @@ Panel {
       root.chatHistoryMap = root.withEntry(root.chatHistoryMap, root.voiceJid, updated)
       Qt.callLater(function () { if (messageList) messageList.positionViewAtEnd() })
     }
+    root.updateChatListSnippet(root.voiceJid, "🎤 Nota de voz", "me", tempVoiceMsg.ts)
 
     root.voiceState = "sending"
     voiceSendProc.command = [root.ctlScript, "voice-send", root.voiceJid, root.voiceToken]
@@ -1105,7 +1150,22 @@ Panel {
         var payload = null
         try { payload = JSON.parse(this.text) } catch (e) { payload = null }
         if (payload && payload.ok === true && Array.isArray(payload.chats)) {
-          root.allChatsList = payload.chats
+          var incomingChats = payload.chats.slice()
+          for (var c = 0; c < incomingChats.length; c++) {
+            var chatItem = incomingChats[c]
+            if (!chatItem || !chatItem.jid) continue
+            var hist = root.chatHistoryMap[chatItem.jid]
+            if (hist && hist.length > 0) {
+              var lastHist = hist[hist.length - 1]
+              if (lastHist && (lastHist.ts || 0) > (chatItem.lastTs || 0)) {
+                chatItem.lastTs = lastHist.ts
+                chatItem.snippet = lastHist.text || (lastHist.mediaType ? "[" + lastHist.mediaType + "]" : (lastHist.filename || ""))
+                chatItem.lastSender = lastHist.fromMe ? "me" : (lastHist.sender || "")
+              }
+            }
+          }
+          incomingChats.sort(function(a, b) { return (b.lastTs || 0) - (a.lastTs || 0) })
+          root.allChatsList = incomingChats
         }
       }
     }
@@ -1158,14 +1218,16 @@ Panel {
               if (!incMsg || !incMsg.fromMe) continue
               if (incMsg.id === curMsg.id) { matched = true; break }
               // Match text messages
-              if (curMsg.text && incMsg.text === curMsg.text && Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 180) {
+              var curText = String(curMsg.text || "").trim()
+              var incText = String(incMsg.text || "").trim()
+              if (curText !== "" && incText === curText && Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 300) {
                 matched = true
                 break
               }
               // Match media / attachments
               if (curMsg.hasMedia && incMsg.hasMedia) {
                 if ((curMsg.filename && incMsg.filename === curMsg.filename) || (curMsg.mediaType && incMsg.mediaType === curMsg.mediaType)) {
-                  if (Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 180) {
+                  if (Math.abs((incMsg.ts || 0) - (curMsg.ts || 0)) < 300) {
                     matched = true
                     break
                   }
@@ -1174,14 +1236,15 @@ Panel {
             }
 
             if (!matched) {
-              // Retain pending message if it was created within the last 3 minutes
-              if (nowSec - (curMsg.ts || 0) < 180) {
+              // Retain pending message if it was created within the last 5 minutes
+              if (nowSec - (curMsg.ts || 0) < 300) {
                 pending.push(curMsg)
               }
             }
           }
 
           var merged = incoming.concat(pending)
+          merged.sort(function(a, b) { return (a.ts || 0) - (b.ts || 0) })
           root.chatHistoryMap = root.withEntry(root.chatHistoryMap, targetJid, merged)
           if (root.activeJid === targetJid) {
             root.messages = merged
