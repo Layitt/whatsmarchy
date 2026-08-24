@@ -37,6 +37,8 @@ VOICE_BYTES_PER_SEC=$((VOICE_RATE * 2))   # mono s16
 VOICE_MAX_AGE_MINUTES=180
 # Ceiling for anything handed to an image decoder, a media player, or a viewer.
 MAX_MEDIA_BYTES=$((500 * 1024 * 1024))
+# Ceiling for remote profile picture (avatar) downloads from WhatsApp CDN.
+MAX_AVATAR_BYTES=$((2 * 1024 * 1024))
 # Previewed attachments are a cache, not a mailbox: without a bound, a group
 # that posts photos all day fills the disk with files the user merely glanced at.
 MEDIA_CACHE_MAX_AGE_DAYS=14
@@ -1020,10 +1022,13 @@ cmd_sync_avatars() {
   require_cmd sha256sum
   require_cmd jq
   require_cmd curl
-  local store db jids missing="" j hash json url count=0
+  local store db jids missing="" j hash json url count=0 tmp_dl
   store="$(resolve_store_dir)" || emit_error "wacli store not found"
   db="$store/wacli.db"
   [[ -r "$db" ]] || emit_error "cannot read $db"
+
+  # Prune avatars older than 30 days
+  find "$cache_dir" -maxdepth 1 -type f -mtime +30 -delete 2>/dev/null || true
 
   jids="$(sqlite3 -readonly -batch -noheader "$db" "SELECT jid FROM chats WHERE kind IN ('dm','group') ORDER BY last_message_ts DESC LIMIT 20;" 2>/dev/null || true)"
   for j in $jids; do
@@ -1047,7 +1052,20 @@ cmd_sync_avatars() {
       json="$(timeout 3s wacli profile picture-info --jid "$j" --json 2>/dev/null || true)"
       url="$(printf '%s' "$json" | jq -r '.data.url // empty' 2>/dev/null || true)"
       if [[ -n "$url" && "$url" != "null" && "$url" =~ ^https:// ]]; then
-        curl --proto =https -s -L -m 4 -- "$url" -o "$cache_dir/$hash.jpg" 2>/dev/null || true
+        tmp_dl="$(mktemp "$cache_dir/.dl.XXXXXX")" 2>/dev/null || continue
+        chmod 600 "$tmp_dl" 2>/dev/null || true
+        # Strict security rules for remote downloads:
+        # - HTTPS only for initial and redirect destinations (--proto =https --proto-redir =https)
+        # - Strict response-size cap (--max-filesize)
+        # - HTTP error failure flag (--fail)
+        # - Download to atomic staging temp file, removed immediately on any failure
+        if curl --proto =https --proto-redir =https -s -L -f -m 4 --max-filesize "$MAX_AVATAR_BYTES" -- "$url" -o "$tmp_dl" 2>/dev/null \
+           && [[ -s "$tmp_dl" ]]; then
+          mv -f -- "$tmp_dl" "$cache_dir/$hash.jpg" 2>/dev/null || rm -f -- "$tmp_dl"
+        else
+          rm -f -- "$tmp_dl" 2>/dev/null
+          touch "$cache_dir/$hash.none" 2>/dev/null || true
+        fi
       else
         touch "$cache_dir/$hash.none" 2>/dev/null || true
       fi
