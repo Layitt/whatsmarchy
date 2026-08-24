@@ -10,7 +10,7 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "jitanjaforas.whatsmarchy"
+  moduleName: "layitt.whatsmarchy"
   manageIpc: false
 
   property var anchorItem: null

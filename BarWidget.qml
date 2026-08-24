@@ -7,7 +7,7 @@ import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "jitanjaforas.whatsmarchy"
+  moduleName: "layitt.whatsmarchy"
 
   // --- settings, read from this widget's shell.json entry -------------------
   readonly property int    interval:      Math.max(5, setting("interval", 20))

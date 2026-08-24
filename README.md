@@ -88,7 +88,7 @@ Open the panel and click the gear icon (⚙️) for:
 ## 🗑️ Uninstall
 
 ```bash
-omarchy plugin remove jitanjaforas.whatsmarchy
+omarchy plugin remove layitt.whatsmarchy
 rm -rf ~/.config/omarchy/whatsmarchy ~/.cache/omarchy-whatsmarchy
 systemctl --user disable --now whatsmarchy-sync
 rm -f ~/.config/systemd/user/whatsmarchy-sync.service
