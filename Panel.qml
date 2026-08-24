@@ -152,9 +152,20 @@ Panel {
   // Keyed by "<jid>|<msgId>"
   property var    mediaPaths: ({})
   property string busyKey: ""
-  property var    allowList: []
   property int    markReadPending: 0
   readonly property bool markReadBusy: root.markReadPending > 0
+
+  onMarkReadPendingChanged: {
+    if (root.markReadPending > 0) markReadSafetyTimer.restart()
+    else markReadSafetyTimer.stop()
+  }
+
+  Timer {
+    id: markReadSafetyTimer
+    interval: 2000
+    repeat: false
+    onTriggered: { root.markReadPending = 0 }
+  }
 
   // --- voice reply state ----------------------------------------------------
   property bool   voiceAvailable: false
@@ -525,16 +536,26 @@ Panel {
   }
 
   function markSeen(jid, ts, onDone) {
+    if (!jid) {
+      if (typeof onDone === "function") onDone()
+      return
+    }
     root.markReadPending++
     var done = function () {
       root.markReadPending = Math.max(0, root.markReadPending - 1)
       if (typeof onDone === "function") onDone()
     }
-    if (!jid) { done(); return }
+    // Optimistic UI: clear badges immediately
+    for (var i = 0; i < root.chats.length; i++) {
+      if (root.chats[i].jid === jid) { root.chats[i].unread = 0; root.chats[i].count = 0 }
+    }
+    for (var j = 0; j < root.allChats.length; j++) {
+      if (root.allChats[j].jid === jid) { root.allChats[j].unread = 0; root.allChats[j].count = 0 }
+    }
     var effectiveTs = ts
     if (!effectiveTs) {
-      for (var i = 0; i < root.chats.length; i++) {
-        if (root.chats[i].jid === jid) { effectiveTs = root.chats[i].lastTs; break }
+      for (var k = 0; k < root.chats.length; k++) {
+        if (root.chats[k].jid === jid) { effectiveTs = root.chats[k].lastTs; break }
       }
     }
     if (!effectiveTs) effectiveTs = Math.round(Date.now() / 1000)
@@ -2959,9 +2980,13 @@ Panel {
       Rectangle {
         anchors.fill: parent
         visible: root.markReadBusy
-        color: Util.alpha(Color.background, 0.65)
+        color: Util.alpha(Color.background, 0.7)
+        z: 999
 
-        MouseArea { anchors.fill: parent; onClicked: function () {} }
+        MouseArea {
+          anchors.fill: parent
+          onClicked: { root.markReadPending = 0 }
+        }
 
         Row {
           anchors.centerIn: parent

@@ -206,30 +206,17 @@ cmd_set_allow() {
 # Best-effort and silent on failure: this must never block or fail the local
 # watermark update, which is the part the widget's own state depends on.
 mark_read_remote() {
-  # One or more JIDs on stdin, one per line, so this stops/starts the sync
-  # service exactly once regardless of how many chats are being cleared.
   command -v systemctl >/dev/null 2>&1 || return 0
   command -v wacli >/dev/null 2>&1 || return 0
   local jid count=0
-  # Without this trap, anything that kills this process between stop and
-  # start (the panel closing, a shell reload, an OOM kill) leaves
-  # whatsmarchy-sync stopped for good — it is Restart=on-failure, which does
-  # not cover a clean stop. RETURN also covers every early `return` below.
   trap 'systemctl --user start whatsmarchy-sync >/dev/null 2>&1' EXIT INT TERM RETURN
   systemctl --user stop whatsmarchy-sync >/dev/null 2>&1
   while IFS= read -r jid; do
     [[ -n "$jid" ]] || continue
     is_jid "$jid" || continue
-    # Capped so one "mark everything as read" cannot chain an unbounded
-    # number of 5s lock-waits (below) into a multi-minute widget-wide freeze.
     (( count >= 30 )) && break
     (( count++ ))
-    # --lock-wait absorbs the gap between `systemctl stop` returning and the
-    # store's own lock file actually clearing (the two are not synchronized) —
-    # without it, this silently no-ops in that window: the local watermark
-    # still advances (mark-seen doesn't go through this path) so the chat
-    # still disappears from the widget, but the phone never sees it as read.
-    wacli chats mark-read --chat "$jid" --json --lock-wait 5s >/dev/null 2>&1
+    timeout 5s wacli chats mark-read --chat "$jid" --json --lock-wait 3s >/dev/null 2>&1 || true
   done
   return 0
 }
@@ -241,17 +228,12 @@ cmd_mark_seen() {
   local jid="${1-}" ts="${2-}" cfg now
   is_jid "$jid" || emit_error "invalid chat id"
   is_uint "$ts" || emit_error "invalid timestamp"
-  # The timestamp comes from a WhatsApp message and the merge below is
-  # deliberately monotonic-forward. A message dated in the future would
-  # therefore pin this chat's watermark to the future and hide every genuine
-  # message from that contact from then on — permanently, since nothing here
-  # ever moves a per-chat watermark backward. Clamped to now.
   now="$(date +%s)"
   (( ts > now )) && ts="$now"
   cfg="$(read_config | jq -c --slurpfile j <(json_arg "$(json_string "$jid")") --argjson t "$ts" \
     '.seen[$j[0]] = ([(.seen[$j[0]] // 0), $t] | max)')" || emit_error "could not update config"
   write_config "$cfg" || emit_error "cannot write $(config_path)"
-  printf '%s\n' "$jid" | mark_read_remote
+  ( printf '%s\n' "$jid" | mark_read_remote ) >/dev/null 2>&1 &
   emit_ok --argjson done true
 }
 
