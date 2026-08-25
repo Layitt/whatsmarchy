@@ -159,6 +159,7 @@ Panel {
   // Keyed by "<jid>|<msgId>"
   property var    mediaPaths: ({})
   property string busyKey: ""
+  property var    allowList: []
   property int    markReadPending: 0
   readonly property bool markReadBusy: root.markReadPending > 0
 
@@ -1749,7 +1750,7 @@ Panel {
         Rectangle {
           width: parent.width
           visible: root.errorText !== ""
-          radius: Style.radius.panel
+          radius: Style.cornerRadius
           color: Util.alpha(root.alertColor, 0.12)
           border.color: Util.alpha(root.alertColor, 0.3)
           border.width: 1
@@ -1808,7 +1809,7 @@ Panel {
         Rectangle {
           width: parent.width
           visible: root.everLoaded && root.errorText === "" && !root.syncRunning
-          radius: Style.radius.panel
+          radius: Style.cornerRadius
           color: Util.alpha(Color.urgent, 0.1)
           border.color: Util.alpha(Color.urgent, 0.25)
           border.width: 1
@@ -1942,7 +1943,7 @@ Panel {
           Button {
             width: parent.width
             text: root.syncingAvatars ? "Sincronizando fotos…" : "Recargar fotos de perfil"
-            icon: root.iconRefresh
+            iconText: root.iconRefresh
             bordered: true
             enabled: !root.syncingAvatars
             foreground: root.contentForeground
