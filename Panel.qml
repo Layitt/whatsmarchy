@@ -2373,7 +2373,7 @@ Panel {
                       text: root.iconMarkRead
                       color: rowMarkMouse.containsMouse ? root.accentColor : Util.alpha(root.contentForeground, 0.6)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.small
+                      font.pixelSize: Style.font.caption
                     }
 
                     MouseArea {
